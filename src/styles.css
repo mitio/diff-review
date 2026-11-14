@@ -11,11 +11,11 @@
   --accent-soft: #ddf4ff;
   --add-bg: #e6ffec;
   --add-num: #ccffd8;
-  --add-word: #abf2bc;
+  --add-word: #c6f3d0;
   --add-fg: #1a7f37;
   --del-bg: #ffebe9;
   --del-num: #ffd7d5;
-  --del-word: #ff8182;
+  --del-word: #ffd4d0;
   --del-fg: #cf222e;
   --gap-bg: #ddf4ff;
   --warn-bg: #fff8c5;
@@ -59,11 +59,11 @@
     --accent-soft: #121d2f;
     --add-bg: #12261e;
     --add-num: #1b4721;
-    --add-word: #26633a;
+    --add-word: #1f4429;
     --add-fg: #3fb950;
     --del-bg: #25171c;
     --del-num: #542426;
-    --del-word: #8e3138;
+    --del-word: #4d2329;
     --del-fg: #f85149;
     --gap-bg: #121d2f;
     --warn-bg: #2e2a1a;

@@ -138,20 +138,42 @@ export function splitPairs(items: Item[], rows: Row[]): SplitItem[] {
   return result;
 }
 
-const wordCache = new Map<string, { a: Seg[]; b: Seg[] }>();
+const wordCache = new Map<string, { a: Seg[]; b: Seg[] } | null>();
+const MIN_SHARED = 0.4;
+
+/** Null when the lines share too little for word highlights to help. */
 export function wordDiff(a: string, b: string): { a: Seg[]; b: Seg[] } | null {
   if (a.length > 500 || b.length > 500) return null;
   const key = a + '\0' + b;
-  const cached = wordCache.get(key);
-  if (cached) return cached;
-  const result: { a: Seg[]; b: Seg[] } = { a: [], b: [] };
-  for (const part of diffWordsWithSpace(a, b)) {
-    if (!part.added) result.a.push({ text: part.value, changed: !!part.removed });
-    if (!part.removed) result.b.push({ text: part.value, changed: !!part.added });
+  if (wordCache.has(key)) return wordCache.get(key)!;
+  const parts = diffWordsWithSpace(a, b);
+  const solid = (t: string) => t.replace(/\s+/g, '').length;
+  const shared = parts.reduce((n, p) => (p.added || p.removed ? n : n + solid(p.value)), 0);
+  let result: { a: Seg[]; b: Seg[] } | null = null;
+  if (shared >= MIN_SHARED * Math.max(solid(a), solid(b))) {
+    result = { a: [], b: [] };
+    for (const part of parts) {
+      if (!part.added) result.a.push({ text: part.value, changed: !!part.removed });
+      if (!part.removed) result.b.push({ text: part.value, changed: !!part.added });
+    }
+    result = { a: joinGaps(result.a), b: joinGaps(result.b) };
   }
   if (wordCache.size >= 5000) wordCache.delete(wordCache.keys().next().value!);
   wordCache.set(key, result);
   return result;
+}
+
+/** Merges whitespace-only gaps between changed segments so a changed run reads as one block. */
+function joinGaps(segs: Seg[]): Seg[] {
+  const out: Seg[] = [];
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const gap = !s.changed && /^\s+$/.test(s.text) && out.at(-1)?.changed && segs[i + 1]?.changed;
+    const last = out.at(-1);
+    if ((gap || s.changed) && last?.changed) last.text += s.text;
+    else out.push({ ...s });
+  }
+  return out;
 }
 
 export interface Anchor { side: Side; line: number }

@@ -129,7 +129,19 @@ it('highlights word differences and bounds long inputs', () => {
   expect(result?.a.filter(s => s.changed).map(s => s.text).join('')).toBe('old');
   expect(result?.b.filter(s => s.changed).map(s => s.text).join('')).toBe('new');
   expect(wordDiff('x'.repeat(501), 'x')).toBeNull();
-  expect(wordDiff('a', 'b')).toBe(wordDiff('a', 'b'));
+  expect(wordDiff('a b', 'a c')).toBe(wordDiff('a b', 'a c'));
+});
+
+it('skips word highlights when lines share little', () => {
+  expect(wordDiff('const maxLen = 20', 'export async function upload(x) {')).toBeNull();
+  expect(wordDiff('foo(bar)', 'foo(bazqux)')).not.toBeNull();
+});
+
+it('joins changed words separated only by whitespace', () => {
+  const r = wordDiff('const value = one two + compute(alpha, beta)', 'const value = uno dos + compute(alpha, beta)');
+  expect(r?.a.filter(s => s.changed).map(s => s.text)).toEqual(['one two']);
+  expect(r?.b.filter(s => s.changed).map(s => s.text)).toEqual(['uno dos']);
+  expect(r?.a.map(s => s.text).join('')).toBe('const value = one two + compute(alpha, beta)');
 });
 
 it('shares a worker, correlates requests, and resolves failures as null', async () => {
