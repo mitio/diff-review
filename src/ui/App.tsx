@@ -111,7 +111,8 @@ function DiffStream() {
   const prRules = useStore(s => s.prRules);
   const threads = useStore(s => s.threads);
   const reveal = useStore(s => s.reveal);
-  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules, reveal]);
+  const grouping = useStore(s => s.settings.grouping);
+  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules, reveal, grouping]);
   const orphans = useMemo(() => {
     const paths = new Set(pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])));
     return threads.filter(t => !paths.has(t.path));

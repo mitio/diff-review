@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PrFile } from '../types.ts';
-import { buildTree, categorize, CATEGORIES, folderKey, isHidden, summarize } from './categorize.ts';
+import { buildTree, categorize, CATEGORIES, folderKey, isHidden, sidebarOrder, summarize } from './categorize.ts';
 
 const file = (path: string, additions = 1, deletions = 2): PrFile => ({ path, additions, deletions, status: 'modified', viewed: 'UNVIEWED' });
 
@@ -55,5 +55,13 @@ describe('categorize', () => {
     expect(tree.children[1].children.map(n => n.name)).toEqual(['a.ts', 'z.ts']);
     expect(buildTree([file('a/b/c.ts')]).children[0].name).toBe('a/b');
     expect(buildTree([]).children).toEqual([]);
+  });
+
+  it('orders files as the sidebar lists them', () => {
+    const files = ['z.ts', 'a/x.test.ts', 'a/y.ts', 'README.md'].map(p => file(p));
+    const order = (g: Parameters<typeof sidebarOrder>[1]) => sidebarOrder(files, g).map(f => f.path);
+    expect(order('flat')).toEqual(['z.ts', 'a/x.test.ts', 'a/y.ts', 'README.md']);
+    expect(order('tree')).toEqual(['a/x.test.ts', 'a/y.ts', 'README.md', 'z.ts']);
+    expect(order('category')).toEqual(['a/x.test.ts', 'README.md', 'z.ts', 'a/y.ts']);
   });
 });

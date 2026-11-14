@@ -9,7 +9,7 @@ import {
   updateComment, updateIssueComment,
 } from '../lib/github.ts';
 import { touchRecent, updateRecent, type RecentPr } from '../lib/recent.ts';
-import { categorize, folderKey, isHidden } from '../lib/categorize.ts';
+import { categorize, folderKey, isHidden, sidebarOrder } from '../lib/categorize.ts';
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
 
@@ -193,8 +193,9 @@ export function matchesFilter(filter: string, f: PrFile) {
 /** Files shown in the diff stream, in order. */
 export function streamFiles(s: State): PrFile[] {
   if (!s.pr) return [];
-  return s.pr.files.filter(f => f.path === s.reveal ||
+  const files = s.pr.files.filter(f => f.path === s.reveal ||
     ((s.settings.showHidden || !fileHidden(s, f)) && matchesFocus(s.focus, f) && matchesFilter(s.filter, f)));
+  return sidebarOrder(files, s.settings.grouping);
 }
 
 export const isViewed = (v: ViewedState | undefined) => v === 'VIEWED';

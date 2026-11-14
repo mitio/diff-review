@@ -102,3 +102,13 @@ export function buildTree(files: PrFile[]): TreeNode {
   compact(root);
   return root;
 }
+
+/** The order the sidebar lists files in, so keyboard stepping and the diff stream follow it. */
+export function sidebarOrder(files: PrFile[], grouping: 'tree' | 'category' | 'flat'): PrFile[] {
+  if (grouping === 'flat') return files;
+  if (grouping === 'category') return CATEGORIES.flatMap(c => files.filter(f => categorize(f.path) === c));
+  const out: PrFile[] = [];
+  const walk = (n: TreeNode) => { if (n.file) out.push(n.file); n.children.forEach(walk); };
+  walk(buildTree(files));
+  return out;
+}
