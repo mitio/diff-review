@@ -131,3 +131,58 @@ test('a failed delete restores only that comment', async () => {
   await removing;
   expect(useStore.getState().threads.map(t => t.id).sort()).toEqual(['A', 'B']);
 });
+
+test('a refresh that predates a successful viewed write does not reset the confirmed state', async () => {
+  await loaded();
+  const refreshed = deferred<unknown>();
+  gh.refreshPr.mockReturnValue(refreshed.promise);
+  gh.setViewed.mockResolvedValue([{ path: 'a.ts', ok: true }]);
+  const r = refresh();
+  markViewed(['a.ts'], true);
+  await vi.advanceTimersByTimeAsync(200);
+  refreshed.resolve({ changed: false, threads: [], viewed: { 'a.ts': 'UNVIEWED' }, pendingReviewId: null });
+  await r;
+  expect(useStore.getState().viewed['a.ts']).toBe('VIEWED');
+  markViewed(['a.ts'], false);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(gh.setViewed).toHaveBeenLastCalledWith('PR', [{ path: 'a.ts', viewed: false }]);
+});
+
+test('reloading the same PR sends a queued viewed toggle instead of dropping it', async () => {
+  await loaded();
+  gh.setViewed.mockResolvedValue([{ path: 'a.ts', ok: true }]);
+  markViewed(['a.ts'], true);
+  await loaded(pr({ files: pr().files.map(f => ({ ...f, viewed: 'UNVIEWED' as const })) }));
+  await vi.advanceTimersByTimeAsync(200);
+  expect(gh.setViewed).toHaveBeenCalledWith('PR', [{ path: 'a.ts', viewed: true }]);
+  expect(useStore.getState().viewed['a.ts']).toBe('VIEWED');
+});
+
+test('a refresh started before a newer load is dropped', async () => {
+  await loaded(pr({ threads: [thread('A')] }));
+  const refreshed = deferred<unknown>();
+  gh.refreshPr.mockReturnValue(refreshed.promise);
+  const r = refresh();
+  await loaded(pr({ threads: [thread('A'), thread('B')] }));
+  refreshed.resolve({ changed: false, threads: [thread('A')], viewed: {}, pendingReviewId: null });
+  await r;
+  expect(useStore.getState().threads.map(t => t.id)).toEqual(['A', 'B']);
+});
+
+test('a snapshot of a new head replaces threads even while a write is in flight, then reconciles', async () => {
+
+  await loaded(pr({ threads: [thread('A')] }));
+  const resolving = deferred<void>();
+  gh.resolveThread.mockReturnValue(resolving.promise);
+  const { setResolved } = await import('./store.ts');
+  const w = setResolved('A', true);
+  const moved = { ...thread('A'), line: 9 };
+  gh.currentOids.mockResolvedValue({ baseOid: 'b', headOid: 'h2' });
+  gh.refreshPr.mockResolvedValue({ changed: false, threads: [moved], viewed: {}, pendingReviewId: null });
+  await loaded(pr({ headOid: 'h2', threads: [moved] }));
+  expect(useStore.getState().threads[0].line).toBe(9);
+  resolving.resolve();
+  await w;
+  await vi.advanceTimersByTimeAsync(400);
+  expect(gh.refreshPr).toHaveBeenCalled();
+});

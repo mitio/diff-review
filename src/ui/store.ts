@@ -202,37 +202,49 @@ async function writing<T>(fn: () => Promise<T>): Promise<T> {
     writesInflight--;
     writeEpoch++;
     set(s => ({ busy: s.busy - 1 }));
+    if (writesInflight === 0 && reconcileNeeded) {
+      reconcileNeeded = false;
+      setTimeout(() => void refresh(), 300);
+    }
   }
 }
 const threadsSafeSince = (epoch: number) => writesInflight === 0 && writeEpoch === epoch;
+/** A snapshot was not applied to threads because of writes: fetch the server's view once they settle. */
+let reconcileNeeded = false;
+function needReconcile() {
+  if (writesInflight === 0) setTimeout(() => void refresh(), 300);
+  else reconcileNeeded = true;
+}
+/** Bumped on every applied snapshot; a refresh started before a newer snapshot is dropped. */
+let dataGen = 0;
 
 // ---------- viewed bookkeeping ----------
-// Per path: the last state GitHub confirmed, the newest local intent (seq), at most one request in flight.
+// Per PR and path: the last state GitHub confirmed, the newest local intent (seq), at most one request in flight.
+// A reload of the same PR keeps the book, so queued and in-flight writes survive it.
 
-const confirmed = new Map<string, ViewedState>();
-const viewedSeq = new Map<string, number>();
-const viewedInflight = new Set<string>();
-const viewedTouched = new Map<string, number>();
-let viewedQueue = new Map<string, { viewed: boolean; seq: number }>();
-let viewedTimer: ReturnType<typeof setTimeout> | null = null;
-
-function resetViewedBookkeeping() {
-  confirmed.clear();
-  viewedSeq.clear();
-  viewedInflight.clear();
-  viewedTouched.clear();
-  viewedQueue = new Map();
-  if (viewedTimer) clearTimeout(viewedTimer);
-  viewedTimer = null;
+interface ViewedBook {
+  key: string;
+  nodeId: string | null;
+  confirmed: Map<string, ViewedState>;
+  seq: Map<string, number>;
+  inflight: Set<string>;
+  touched: Map<string, number>;
+  queue: Map<string, { viewed: boolean; seq: number }>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
+const newBook = (key: string): ViewedBook => ({
+  key, nodeId: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(), timer: null,
+});
+let book = newBook('');
 
-/** Server viewed states, applied only for paths the user has not touched since `since`. */
+/** Server viewed states, applied (and trusted as confirmed) only for paths not written since `since`. */
 function mergeServerViewed(cur: Dict<ViewedState>, server: Iterable<[string, ViewedState]>, since: number) {
   const viewed = dict(cur);
   for (const [p, v] of server) {
-    confirmed.set(p, v);
-    const busyPath = viewedInflight.has(p) || viewedQueue.has(p) || (viewedTouched.get(p) ?? -Infinity) >= since;
-    if (!busyPath) viewed[p] = v;
+    const busyPath = book.inflight.has(p) || book.queue.has(p) || (book.touched.get(p) ?? -Infinity) >= since;
+    if (busyPath) continue;
+    viewed[p] = v;
+    book.confirmed.set(p, v);
   }
   return viewed;
 }
@@ -244,13 +256,16 @@ export async function load(ref: PrRef) {
   const seq = ++loadSeq;
   const started = performance.now();
   const epoch = writeEpoch;
-  resetViewedBookkeeping();
-  set({
-    ref, loading: true, error: null, pr: null, viewed: dict(), threads: [], threadsByPath: dict(), pendingReviewId: null,
+  const key = prId(ref);
+  if (book.queue.size) void flushViewed(book);
+  const samePr = book.key === key;
+  if (!samePr) book = newBook(key);
+  set(s => ({
+    ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : dict(), threads: [], threadsByPath: dict(),
+    pendingReviewId: null,
     blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null,
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
-  });
-  const key = prId(ref);
+  }));
   const freshP = loadPr(ref);
   freshP.catch(() => {});
   const cached = await getPr(key);
@@ -275,8 +290,6 @@ export async function load(ref: PrRef) {
     void putPr(key, final);
     const now = await currentOids(ref);
     if (seq === loadSeq && (now.baseOid !== final.baseOid || now.headOid !== final.headOid)) set({ stale: true });
-    // comments written against the cached copy kept local threads; pick up the server's view once writes settle
-    else if (seq === loadSeq && !threadsSafeSince(epoch)) setTimeout(() => void refresh(), 1500);
   } catch (e) {
     if (seq !== loadSeq) return;
     if (cached) toast(`Showing cached copy; refresh failed: ${errText(e)}`, true);
@@ -313,13 +326,13 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
       }),
     };
   }
+  dataGen++;
+  book.nodeId = pr.id;
+  // local threads are only worth keeping over a snapshot of the same revision (their anchors match)
+  const keepLocal = !!prev && sameRev && !threadsSafeSince(epoch);
+  if (!threadsSafeSince(epoch)) needReconcile();
   set(s => {
-    const viewed = prev ? mergeServerViewed(s.viewed, pr.files.map(f => [f.path, f.viewed]), started) : (() => {
-      const v = dict<ViewedState>();
-      for (const f of pr.files) { v[f.path] = f.viewed; confirmed.set(f.path, f.viewed); }
-      return v;
-    })();
-    const keepLocal = prev && !threadsSafeSince(epoch);
+    const viewed = mergeServerViewed(s.viewed, pr.files.map(f => [f.path, f.viewed]), started);
     const threads = keepLocal ? s.threads : mergeTemp(pr.threads, s.threads);
     return {
       pr, loading: false, revalidating: fromCache, viewed, threads, threadsByPath: byPath(threads),
@@ -404,17 +417,21 @@ export async function refresh(manual = false) {
   refreshing = true;
   const started = performance.now();
   const epoch = writeEpoch;
+  const gen = dataGen;
   const pr0 = s.pr;
   try {
     const r = await refreshPr(pr0.ref, { baseOid: pr0.baseOid, headOid: pr0.headOid });
-    if (get().pr !== pr0 && (!get().pr || revision(get().pr!) !== revision(pr0))) return;
+    if (gen !== dataGen) return;
     if (r.changed) {
       set({ stale: true });
       return;
     }
     set(st => {
       const viewed = mergeServerViewed(st.viewed, Object.entries(r.viewed), started);
-      if (!threadsSafeSince(epoch)) return { viewed };
+      if (!threadsSafeSince(epoch)) {
+        needReconcile();
+        return { viewed };
+      }
       const threads = mergeTemp(r.threads, st.threads);
       return { viewed, threads, threadsByPath: byPath(threads), pendingReviewId: r.pendingReviewId };
     });
@@ -443,6 +460,7 @@ function mergeTemp(server: Thread[], local: Thread[]) {
 export function markViewed(paths: string[], viewed: boolean) {
   const s = get();
   if (!s.pr) return;
+  const b = book;
   const next = dict(s.viewed);
   const collapsed = dict(s.collapsed);
   const now = performance.now();
@@ -450,65 +468,65 @@ export function markViewed(paths: string[], viewed: boolean) {
     if (isViewed(s.viewed[p]) === viewed) continue;
     next[p] = viewed ? 'VIEWED' : 'UNVIEWED';
     delete collapsed[p];
-    viewedTouched.set(p, now);
-    const seq = (viewedSeq.get(p) ?? 0) + 1;
-    viewedSeq.set(p, seq);
-    viewedQueue.set(p, { viewed, seq });
+    b.touched.set(p, now);
+    const seq = (b.seq.get(p) ?? 0) + 1;
+    b.seq.set(p, seq);
+    b.queue.set(p, { viewed, seq });
   }
   set({ viewed: next, collapsed });
-  scheduleViewedFlush();
+  scheduleViewedFlush(b);
 }
 
-function scheduleViewedFlush() {
-  if (viewedTimer) clearTimeout(viewedTimer);
-  viewedTimer = setTimeout(flushViewed, 150);
+function scheduleViewedFlush(b: ViewedBook) {
+  if (b.timer) clearTimeout(b.timer);
+  b.timer = setTimeout(() => void flushViewed(b), 150);
 }
 
-async function flushViewed() {
-  viewedTimer = null;
-  const pr = get().pr;
-  if (!pr) return;
+async function flushViewed(b: ViewedBook) {
+  if (b.timer) clearTimeout(b.timer);
+  b.timer = null;
+  const nodeId = b.nodeId;
+  if (!nodeId) return;
   const batch: Array<{ path: string; viewed: boolean; seq: number }> = [];
-  for (const [path, q] of viewedQueue) {
-    if (viewedInflight.has(path)) continue;
+  for (const [path, q] of b.queue) {
+    if (b.inflight.has(path)) continue;
     // nothing to send if the intent equals what GitHub already has
-    if (isViewed(confirmed.get(path)) === q.viewed && confirmed.get(path) !== undefined) {
-      viewedQueue.delete(path);
+    const c = b.confirmed.get(path);
+    if (c !== undefined && isViewed(c) === q.viewed) {
+      b.queue.delete(path);
       continue;
     }
     batch.push({ path, ...q });
   }
   if (!batch.length) return;
   for (const q of batch) {
-    viewedQueue.delete(q.path);
-    viewedInflight.add(q.path);
+    b.queue.delete(q.path);
+    b.inflight.add(q.path);
   }
   let results: Array<{ path: string; ok: boolean }>;
   try {
-    results = await setViewed(pr.id, batch.map(q => ({ path: q.path, viewed: q.viewed })));
+    results = await setViewed(nodeId, batch.map(q => ({ path: q.path, viewed: q.viewed })));
   } catch {
     results = batch.map(q => ({ path: q.path, ok: false }));
   }
-  if (get().pr?.id !== pr.id) return;
   const ok = new Map(results.map(r => [r.path, r.ok]));
-  const failed: string[] = [];
   const now = performance.now();
-  set(s => {
-    const viewed = dict(s.viewed);
-    for (const q of batch) {
-      viewedInflight.delete(q.path);
-      viewedTouched.set(q.path, now);
-      if (ok.get(q.path)) {
-        confirmed.set(q.path, q.viewed ? 'VIEWED' : 'UNVIEWED');
-      } else if (viewedSeq.get(q.path) === q.seq) {
-        viewed[q.path] = confirmed.get(q.path) ?? 'UNVIEWED';
-        failed.push(q.path);
-      }
-    }
-    return { viewed };
-  });
-  if (failed.length) toast(`Could not update viewed state of ${failed.length} file(s)`, true);
-  if (viewedQueue.size) scheduleViewedFlush();
+  const rollback: Array<[string, ViewedState]> = [];
+  for (const q of batch) {
+    b.inflight.delete(q.path);
+    b.touched.set(q.path, now);
+    if (ok.get(q.path)) b.confirmed.set(q.path, q.viewed ? 'VIEWED' : 'UNVIEWED');
+    else if (b.seq.get(q.path) === q.seq) rollback.push([q.path, b.confirmed.get(q.path) ?? 'UNVIEWED']);
+  }
+  if (rollback.length && book === b) {
+    set(s => {
+      const viewed = dict(s.viewed);
+      for (const [p, v] of rollback) viewed[p] = v;
+      return { viewed };
+    });
+    toast(`Could not update viewed state of ${rollback.length} file(s)`, true);
+  }
+  if (b.queue.size) scheduleViewedFlush(b);
 }
 
 // ---------- hide rules ----------
