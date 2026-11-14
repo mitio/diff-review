@@ -2,14 +2,15 @@ import { memo, useEffect, useMemo, useState, type MouseEvent, type ReactNode } f
 import type { FileModel, Item, PrFile, Row, Seg, Side, SplitItem, Thread } from '../types.ts';
 import { buildModel, lineAnchor, parsePatch, splitPairs, threadRowIndex, validRange, view, wordDiff, type RangeCheck } from '../lib/diff.ts';
 import {
-  ALL, closeComposer, expand, fileHidden, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
-  toast, toggleFileHidden, useStore, type ComposerTarget,
+  ALL, closeComposer, expand, fileHidden, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed, setOutlineOpen,
+  toast, toggleFileHidden, toggleOutline, toggleOutlineSection, useStore, type ComposerTarget,
 } from './store.ts';
 import { Lazy } from './Lazy.tsx';
 import { NewComment, ThreadView } from './Thread.tsx';
 import { StatusLetter } from './bits.tsx';
 import { requestHighlight, useHighlight, type RowToks } from './hl.ts';
-import type { Tok } from '../lib/languages.ts';
+import { languageOf, type Tok } from '../lib/languages.ts';
+import { outline } from '../lib/outline.ts';
 
 const EMPTY: never[] = [];
 const CHUNK = 400;
@@ -35,6 +36,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   const hidden = useStore(s => fileHidden(s, file));
   const pr = useStore(s => s.pr)!;
   const composer = useStore(s => s.composers[path]);
+  const outlined = useStore(s => !!s.outline[path]);
   const [forceBig, setForceBig] = useState(false);
 
   const collapsed = collapsedOverride ?? isViewed(viewed);
@@ -54,7 +56,8 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   let body: ReactNode = null;
   if (!collapsed) {
     if (model && (changed <= BIG || forceBig)) {
-      body = <DiffBody file={file} model={model} threads={lineThreads} composer={composer} hlReady={blob !== 'loading'} />;
+      const Body = outlined ? OutlineBody : DiffBody;
+      body = <Body file={file} model={model} threads={lineThreads} composer={composer} hlReady={blob !== 'loading'} />;
     } else if (model) {
       body = (
         <div className="fnote">
@@ -101,6 +104,9 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         {hidden && <span className="chip">hidden</span>}
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
         {blob === 'loading' && !collapsed && <span className="faint" title="loading full file for context">…</span>}
+        <button className={`small${outlined ? ' on' : ''}`} title="Show only the file's structure (z)" onClick={() => toggleOutline(path)}>
+          Outline
+        </button>
         <button className="small" title="Comment on file" onClick={() => { setCollapsed(path, false); openComposer(path, { kind: 'file' }); }}>
           Comment
         </button>
@@ -131,9 +137,12 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   );
 });
 
-function DiffBody({ file, model, threads, composer, hlReady }: {
+interface BodyProps {
   file: PrFile; model: FileModel; threads: Thread[]; composer: ComposerTarget | undefined; hlReady: boolean;
-}) {
+}
+
+/** `range`: render only rows [from, to], all of them (an expanded outline section). */
+function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps & { range?: [number, number] }) {
   const path = file.path;
   const hlOn = useStore(s => s.settings.highlight) && hlReady;
   const toks = useHighlight(model, path, hlOn);
@@ -165,11 +174,12 @@ function DiffBody({ file, model, threads, composer, hlReady }: {
   const sel = lineComposer?.ok ? lineComposer : null;
 
   const items = useMemo(() => {
+    if (range) return Array.from({ length: range[1] - range[0] + 1 }, (_, k): Item => ({ kind: 'row', idx: range[0] + k }));
     const exp: Array<[number, number]> = [...stored];
     for (const i of byRow.m.keys()) exp.push([i, i]);
     if (sel) exp.push([sel.startIdx, sel.endIdx]);
     return view(model, context, exp);
-  }, [model, context, stored, byRow, sel]);
+  }, [model, context, stored, byRow, sel, range?.[0], range?.[1]]);
 
   const pairs = useMemo(() => splitPairs(items, model.rows), [items, model]);
   const partner = useMemo(() => {
@@ -191,24 +201,76 @@ function DiffBody({ file, model, threads, composer, hlReady }: {
 
   return (
     <>
-      {lineComposer && !lineComposer.ok && (
+      {!range && lineComposer && !lineComposer.ok && (
         <div className="file-threads">
           <div className="fnote">{lineComposer.reason}</div>
         </div>
       )}
-      {byRow.orphans.length > 0 && (
+      {!range && byRow.orphans.length > 0 && (
         <div className="file-threads">
           {byRow.orphans.map(t => <ThreadView key={t.id} thread={t} showLocation />)}
         </div>
       )}
       {chunks.map((c, i) => (
-        <Lazy key={i} estimate={c.length * 18} eager={i === 0 && list.length < 200}>
+        <Lazy key={i} estimate={c.length * 18} eager={!!range || (i === 0 && list.length < 200)}>
           {() => <Chunk items={c} ctx={ctx} />}
         </Lazy>
       ))}
-      {list.length === 0 && <div className="fnote">No changes to show.</div>}
+      {!range && list.length === 0 && <div className="fnote">No changes to show.</div>}
     </>
   );
+}
+
+function OutlineBody(props: BodyProps) {
+  const { file, model, threads, hlReady } = props;
+  const path = file.path;
+  const toks = useHighlight(model, path, useStore(s => s.settings.highlight) && hlReady);
+  const entries = useMemo(() => outline(model.rows, languageOf(path), toks && (i => inStringOrComment(model.rows[i], toks, i))), [model, path, toks]);
+  const open = useStore(s => s.outlineOpen[path]) ?? EMPTY;
+  const threadRows = useMemo(() => threads.map(t => threadRowIndex(model, t)).filter(i => i >= 0), [threads, model]);
+  const changed = entries.filter(e => e.add + e.del > 0);
+  return (
+    <>
+      <div className="outline-bar">
+        <span>{entries.length} sections, {changed.length} changed</span>
+        <button className="link" onClick={() => setOutlineOpen(path, changed.map(e => e.idx))}>expand changed</button>
+        <button className="link" onClick={() => setOutlineOpen(path, [])}>collapse all</button>
+        {!model.complete && <span className="faint">only the changed hunks are loaded, so this outline is partial</span>}
+      </div>
+      {entries.map(e => {
+        const row = model.rows[e.idx];
+        const isOpen = open.includes(e.idx);
+        const from = row.kind === 'ctx' && !e.top ? e.idx + 1 : e.idx;
+        const nThreads = threadRows.filter(i => i >= e.idx && i <= e.end).length;
+        let rowToks = (row.kind === 'del' ? toks?.a : toks?.b)?.[e.idx] ?? null;
+        if (rowToks && rowToks.reduce((n, t) => n + t[0], 0) !== row.text.length) rowToks = null;
+        return (
+          <div key={e.idx}>
+            <div className={`oline ${row.kind}${e.add + e.del ? '' : ' quiet'}`} onClick={() => toggleOutlineSection(path, e.idx)}>
+              <span className="caret">{isOpen ? '▾' : '▸'}</span>
+              <span className="onum">{e.top ? '' : row.newNo ?? row.oldNo}</span>
+              <span className="ocode">
+                {e.top ? <i className="faint">top of file</i> : renderLine(row.text, rowToks, null, 'ins')}
+              </span>
+              {nThreads > 0 && <span className="chip" title="threads">💬 {nThreads}</span>}
+              {e.add > 0 && <span className="add mono">+{e.add}</span>}
+              {e.del > 0 && <span className="del mono">−{e.del}</span>}
+            </div>
+            {isOpen && from <= e.end && <DiffBody {...props} range={[from, e.end]} />}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function inStringOrComment(row: Row, toks: RowToks, i: number) {
+  const t = (row.kind === 'del' ? toks.a : toks.b)[i];
+  let at = 0;
+  for (const [n, cls] of t ?? []) {
+    if (row.text.slice(at, (at += n)).trim()) return /hljs-(?:string|comment|subst)/.test(cls);
+  }
+  return false;
 }
 
 interface RowCtx {

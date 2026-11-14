@@ -3,7 +3,7 @@ import type { Check, CheckBucket, PrRef, RecentStatus, ReviewEvent } from '../ty
 import { fetchRecentStatus, parsePrUrl } from '../lib/github.ts';
 import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent.ts';
 import {
-  ALL, discard, dismissToast, flushRecent, toast, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
+  ALL, discard, dismissToast, flushRecent, toast, toggleOutline, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
   refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
@@ -311,6 +311,7 @@ const KEYS: Array<[string, string]> = [
   ['j / k', 'next / previous file'],
   ['v', 'toggle viewed, jump to next unviewed'],
   ['x', 'collapse / expand current file'],
+  ['z', 'outline of current file'],
   ['s', 'toggle unified / split'],
   ['[ / ]', 'less / more context'],
   ['- / =', 'smaller / larger font'],
@@ -355,6 +356,7 @@ function useKeys() {
         case 'j': stepFile(1); break;
         case 'k': stepFile(-1); break;
         case 'v': toggleViewedCurrent(); break;
+        case 'z': if (s.current) { useStore.setState({ tab: 'diff' }); toggleOutline(s.current); } break;
         case 'x': if (s.current) setCollapsed(s.current, !(s.collapsed[s.current] ?? isViewed(s.viewed[s.current]))); break;
         case 's': updateSettings({ viewMode: st.viewMode === 'split' ? 'unified' : 'split' }); break;
         case '[': updateSettings({ context: CONTEXTS[Math.max(0, (i < 0 ? 3 : i) - 1)] }); break;

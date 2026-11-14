@@ -26,7 +26,7 @@ there. The home page lists the last 50 PRs you opened, with their live state, CI
 - **The URL holds the view** (tab, focused group, filter, current file), so back/forward and links work.
   Unified/split, context and font size are preferences and stay as you set them.
 - **Keys:** `j/k` files, `v` viewed + next, `x` collapse, `s` split/unified, `[ ]` context, `- =` font, `/` filter,
-  `o/d/t` overview/diff/conversation, `r` refresh, `c` file comment, `?` help.
+  `o/d/t` overview/diff/conversation, `r` refresh, `c` file comment, `z` outline, `?` help.
 
 `npm test` runs the unit tests and `npm run typecheck` runs the type checker. Design and decisions: `docs/plan.md`.
 

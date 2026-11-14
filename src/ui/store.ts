@@ -75,6 +75,9 @@ interface State {
   selAnchor: { path: string; anchor: Anchor } | null;
   /** line range being drag-selected; the composer opens on mouseup */
   dragSel: { path: string; a: Anchor; b: Anchor } | null;
+  /** files shown as an outline, and the outline sections (start rows) expanded in each */
+  outline: Dict<boolean>;
+  outlineOpen: Dict<number[]>;
   tab: Tab;
   current: string | null;
   /** file to scroll to once it is rendered (from the URL) */
@@ -139,7 +142,7 @@ const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
 export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
-  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
+  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
   toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
@@ -309,7 +312,7 @@ export async function load(ref: PrRef) {
   set(s => ({
     ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
     pendingReviewId: null, checks: null, ...(samePr ? {} : { conv: null, current: null, reveal: null }),
-    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null,
+    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(),
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
   const freshP = loadPr(ref);
@@ -640,6 +643,19 @@ export function toggleFileHidden(f: PrFile) {
 
 export function setCollapsed(path: string, collapsed: boolean) {
   set(s => ({ collapsed: put(s.collapsed, path, collapsed) }));
+}
+
+export function toggleOutline(path: string) {
+  set(s => ({ outline: put(s.outline, path, !s.outline[path]), collapsed: put(s.collapsed, path, false) }));
+}
+
+export function setOutlineOpen(path: string, starts: number[]) {
+  set(s => ({ outlineOpen: put(s.outlineOpen, path, starts) }));
+}
+
+export function toggleOutlineSection(path: string, start: number) {
+  const open = get().outlineOpen[path] ?? [];
+  setOutlineOpen(path, open.includes(start) ? open.filter(x => x !== start) : [...open, start]);
 }
 
 export function expand(path: string, from: number, to: number) {
