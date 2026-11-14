@@ -380,3 +380,10 @@ Pass 2, 3 findings, all fixed:
 1. Back to an entry whose (current) file is excluded by its restored filter lost the file; it is re-revealed.
 2. A viewed rollback for a PR no longer open didn't correct that PR's recent-PR count; it is shifted by the delta.
 3. Line-ending-only changes left deleted rows without tokens; identical texts now map line by line.
+
+Pass 3, 3 findings, fixed by changing approach rather than patching:
+1–2. The rollback delta for a closed PR could corrupt a newer revision's count, and a queued snapshot could overwrite
+   it. Recent-PR writes are now merged per PR in one debounced queue, and a closed PR's count is recomputed from its
+   viewed book (`paths` of the newest snapshot; local intent while a write is pending, else GitHub's state).
+3. Back during a same-PR reload skipped re-targeting an excluded file. A restored file is now re-targeted unless it is
+   provably on screen: same PR, loaded, already current and in the stream under the restored filters.

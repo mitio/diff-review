@@ -8,7 +8,7 @@ import {
   fetchChecks, fetchConversation, fetchPatches, loadPr, refreshPr, replyThread, resolveThread, setViewed, submitReview,
   updateComment, updateIssueComment,
 } from '../lib/github.ts';
-import { adjustRecentViewed, touchRecent, updateRecent } from '../lib/recent.ts';
+import { touchRecent, updateRecent, type RecentPr } from '../lib/recent.ts';
 import { categorize, folderKey, isHidden } from '../lib/categorize.ts';
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
@@ -260,11 +260,17 @@ interface ViewedBook {
   timer: ReturnType<typeof setTimeout> | null;
   /** the newest local state per written path (intent, or the rollback after a failure) */
   local: Map<string, ViewedState>;
+  /** files of the newest applied snapshot */
+  paths: string[];
 }
 const newBook = (key: string): ViewedBook => ({
   key, ref: null, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(),
-  timer: null, local: new Map(),
+  timer: null, local: new Map(), paths: [],
 });
+/** Viewed files as this book knows them: the local intent while a write is pending, else GitHub's state. */
+function bookViewedCount(b: ViewedBook) {
+  return b.paths.filter(p => isViewed(b.queue.has(p) || b.inflight.has(p) ? b.local.get(p) : b.confirmed.get(p) ?? b.local.get(p))).length;
+}
 let book = newBook('');
 /** Books outlive navigation, so A -> B -> A keeps A's queued and in-flight writes ordered. */
 const books = new Map<string, ViewedBook>();
@@ -367,6 +373,7 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
   }
   dataGen++;
   book.nodeId = pr.id;
+  book.paths = pr.files.map(f => f.path);
   const newRevision = book.revision !== null && book.revision !== revision(pr);
   book.revision = revision(pr);
   // local threads are only worth keeping over a snapshot of the same revision (their anchors match)
@@ -588,7 +595,7 @@ async function flushViewed(b: ViewedBook) {
     toast(`Could not update viewed state of ${rollback.length} file(s)`, true);
     recordRecent();
   } else if (rollback.length && b.ref) {
-    adjustRecentViewed(b.ref, rollback.reduce((n, [, v]) => n + (isViewed(v) ? 1 : -1), 0));
+    queueRecent(b.ref, { viewed: bookViewedCount(b) });
   }
   if (b.queue.size) scheduleViewedFlush(b);
 }
@@ -812,24 +819,27 @@ export async function discard(): Promise<boolean> {
 
 // ---------- recent PRs ----------
 
-/** Snapshot taken now (the PR may change before the debounced write); one write per PR. */
-const recentQueue = new Map<string, () => void>();
+type RecentPatch = Partial<Omit<RecentPr, 'owner' | 'repo' | 'number' | 'openedAt'>>;
+/** Debounced writes, merged per PR; values are taken when queued (the open PR may change before the write). */
+const recentQueue = new Map<string, { ref: PrRef; patch: RecentPatch }>();
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
+function queueRecent(ref: PrRef, patch: RecentPatch) {
+  const k = prId(ref);
+  recentQueue.set(k, { ref, patch: { ...recentQueue.get(k)?.patch, ...patch } });
+  recentTimer ??= setTimeout(() => {
+    recentTimer = null;
+    for (const { ref, patch } of recentQueue.values()) updateRecent(ref, patch);
+    recentQueue.clear();
+  }, 300);
+}
 function recordRecent() {
   const { pr, viewed } = get();
   if (!pr) return;
-  const patch = {
+  queueRecent(pr.ref, {
     title: pr.title, author: pr.author, state: pr.state, isDraft: pr.isDraft, files: pr.changedFiles,
     additions: pr.additions, deletions: pr.deletions, headOid: pr.headOid,
     viewed: pr.files.filter(f => isViewed(viewed[f.path])).length,
-  };
-  const ref = pr.ref;
-  recentQueue.set(prId(ref), () => updateRecent(ref, patch));
-  recentTimer ??= setTimeout(() => {
-    recentTimer = null;
-    for (const write of recentQueue.values()) write();
-    recentQueue.clear();
-  }, 300);
+  });
 }
 
 // ---------- CI checks ----------

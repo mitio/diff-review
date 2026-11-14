@@ -61,14 +61,11 @@ function apply(r: Route) {
   const prChanged = !sameRef(useRoute.getState().ref, r.ref);
   if (prChanged) useRoute.setState({ ref: r.ref });
   if (!r.ref) return;
-  // a restored entry replaces any earlier jump target and reveal
-  useStore.setState({
-    tab: r.tab, focus: r.focus, filter: r.q, reveal: null,
-    pendingFile: r.file && (prChanged || r.file !== s.current) ? r.file : null,
-  });
-  // the entry's file may need revealing again under the restored filters
-  const now = useStore.getState();
-  if (r.file && !now.pendingFile && now.pr && !streamFiles(now).some(f => f.path === r.file)) useStore.setState({ pendingFile: r.file });
+  // A restored entry replaces any earlier jump target and reveal. Its file is targeted again unless it is already
+  // on screen under the restored filters (re-targeting would scroll away from where the reader was in it).
+  const next = { ...s, tab: r.tab, focus: r.focus, filter: r.q, reveal: null };
+  const onScreen = !prChanged && !!s.pr && !s.loading && r.file === s.current && streamFiles(next).some(f => f.path === r.file);
+  useStore.setState({ tab: r.tab, focus: r.focus, filter: r.q, reveal: null, pendingFile: r.file && !onScreen ? r.file : null });
 }
 
 function currentRoute(): Route | null {

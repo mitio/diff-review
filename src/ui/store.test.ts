@@ -10,7 +10,14 @@ const gh = vi.hoisted(() => ({
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
 
+import { listRecent } from '../lib/recent.ts';
 import { createThread, load, markViewed, postComment, refresh, removeComment, useStore } from './store.ts';
+
+const mem = new Map<string, string>();
+globalThis.localStorage = {
+  getItem: k => mem.get(k) ?? null, setItem: (k, v) => void mem.set(k, v), removeItem: k => void mem.delete(k),
+  clear: () => mem.clear(), key: () => null, length: 0,
+} as Storage;
 
 const ref = { owner: 'o', repo: 'r', number: 1 };
 const thread = (id: string, path = 'a.ts', commentId = `${id}-c`): Thread => ({
@@ -306,4 +313,18 @@ test('a conversation fetch that a finished write made stale is retried', async (
   await flush();
   await flush();
   expect(useStore.getState().conv?.body).toBe('B2');
+});
+
+test("a failed viewed write corrects the recent count of a PR that is no longer open", async () => {
+  mem.clear();
+  await loaded();
+  const write = deferred<Array<{ path: string; ok: boolean }>>();
+  gh.setViewed.mockReturnValueOnce(write.promise);
+  markViewed(['a.ts'], true);
+  await vi.advanceTimersByTimeAsync(160);
+  gh.loadPr.mockResolvedValue(pr({ ref: ref2, id: 'PR2' }));
+  await load(ref2);
+  write.resolve([{ path: 'a.ts', ok: false }]);
+  await vi.advanceTimersByTimeAsync(400);
+  expect(listRecent().find(e => e.number === 1)?.viewed).toBe(0);
 });
