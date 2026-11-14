@@ -336,11 +336,17 @@ function Help() {
   );
 }
 
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']);
+function typesText(t: HTMLElement) {
+  if (t instanceof HTMLInputElement) return !NON_TEXT_INPUTS.has(t.type);
+  return !!t.closest('textarea, select, [contenteditable]');
+}
+
 function useKeys() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (typesText(t) || e.metaKey || e.ctrlKey || e.altKey) return;
       const s = useStore.getState();
       const st = s.settings;
       const i = CONTEXTS.indexOf(st.context);
