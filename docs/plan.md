@@ -282,3 +282,18 @@ export interface BlobResult { text: string | null; binary: boolean; truncated: b
    timings (load, unified/split toggle, context change) via `performance.now` in agent-browser, plus pdf
    screenshots. Write paths are tested with a pending review on the user's own PR, which is deleted after.
 5. codex review @ xhigh of the code. Fix, then commit (local repo, signed, no remote).
+
+## Code-review outcomes (Sol @ xhigh, three passes)
+
+- Pass 1 found 17 bugs. All were fixed (`4896590`). The main ones: mixed REST/GraphQL revisions, comment targets
+  stored as row indexes (now (side, line) anchors), stale refreshes erasing fresh writes, reversed viewed writes.
+- Pass 2 confirmed 16 fixed and 1 partial, and found 4 regressions (`ce4f682`). The fixes: viewed bookkeeping became
+  per-PR and survives a reload, snapshot generations, reconcile after writes.
+- Pass 3 confirmed all of those fixed and found 3 narrower races (`d091052`): queued refreshes, pre-reload refresh
+  results, new-revision viewed state.
+- Each fix has a store test that fails without it (`src/ui/store.test.ts`).
+
+Since the plan: the REST file list truncates large PRs (0/0, no patch), so per-file counts come from GraphQL.
+Missing patches come from the whole-PR `.diff` (`/api/diff/...`), fetched after first paint. A cached PR snapshot
+in IndexedDB gives ~0.3 s repeat visits (stale-while-revalidate). Overview is an overlay so the diff stream stays
+mounted.
