@@ -826,11 +826,14 @@ let recentTimer: ReturnType<typeof setTimeout> | null = null;
 function queueRecent(ref: PrRef, patch: RecentPatch) {
   const k = prId(ref);
   recentQueue.set(k, { ref, patch: { ...recentQueue.get(k)?.patch, ...patch } });
-  recentTimer ??= setTimeout(() => {
-    recentTimer = null;
-    for (const { ref, patch } of recentQueue.values()) updateRecent(ref, patch);
-    recentQueue.clear();
-  }, 300);
+  recentTimer ??= setTimeout(flushRecent, 300);
+}
+/** Writes queued recent-PR updates now (Home reads them on mount). */
+export function flushRecent() {
+  if (recentTimer) clearTimeout(recentTimer);
+  recentTimer = null;
+  for (const { ref, patch } of recentQueue.values()) updateRecent(ref, patch);
+  recentQueue.clear();
 }
 function recordRecent() {
   const { pr, viewed } = get();

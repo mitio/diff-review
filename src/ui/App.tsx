@@ -3,7 +3,7 @@ import type { Check, CheckBucket, PrRef, RecentStatus, ReviewEvent } from '../ty
 import { fetchRecentStatus, parsePrUrl } from '../lib/github.ts';
 import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent.ts';
 import {
-  ALL, discard, dismissToast, toast, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
+  ALL, discard, dismissToast, flushRecent, toast, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
   refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
@@ -428,7 +428,7 @@ const prPath = (r: PrRef) => `/${r.owner}/${r.repo}/pull/${r.number}`;
 export function Home() {
   const [v, setV] = useState('');
   const [err, setErr] = useState('');
-  const [recent, setRecent] = useState<RecentPr[]>(() => listRecent());
+  const [recent, setRecent] = useState<RecentPr[]>(() => { flushRecent(); return listRecent(); });
   const [live, setLive] = useState<Map<string, RecentStatus> | null>(null);
   useEffect(() => {
     document.title = 'gh-review';

@@ -387,3 +387,9 @@ Pass 3, 3 findings, fixed by changing approach rather than patching:
    viewed book (`paths` of the newest snapshot; local intent while a write is pending, else GitHub's state).
 3. Back during a same-PR reload skipped re-targeting an excluded file. A restored file is now re-targeted unless it is
    provably on screen: same PR, loaded, already current and in the stream under the restored filters.
+
+Pass 4, 2 findings:
+1. Not fixed (known limit): if un-viewing a file fails while a new revision arrived in which GitHub reports it
+   `DISMISSED`, the rollback restores the older revision's `VIEWED`. Recording server state for in-flight paths would
+   break the "nothing to send if GitHub already has it" check. The next refresh or reopen corrects it.
+2. Home could read the recent list before a queued correction was written; Home now flushes the queue on mount.
