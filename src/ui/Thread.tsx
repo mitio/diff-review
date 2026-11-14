@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import type { Comment, NewThread, Thread } from '../types.ts';
-import { createThread, editComment, removeComment, reply, setResolved, useStore } from './store.ts';
+import { createThread, draftKey, editComment, removeComment, reply, setResolved, useStore } from './store.ts';
 import { UserLink, relTime } from './bits.tsx';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
@@ -11,7 +11,6 @@ DOMPurify.addHook('afterSanitizeAttributes', node => {
   }
 });
 
-const draftKey = (k: string) => `ghr:draft:${k}`;
 const loadDraft = (k: string) => {
   try { return localStorage.getItem(draftKey(k)); } catch { return null; }
 };

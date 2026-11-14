@@ -148,7 +148,7 @@ const FileRow = memo(function FileRow({ f, max, depth, label }: { f: PrFile; max
   const v = useStore(s => s.viewed[f.path]);
   const current = useStore(s => s.current === f.path);
   const hidden = useStore(s => fileHidden(s, f));
-  const nThreads = useStore(s => s.threadsByPath[f.path]?.length ?? 0);
+  const nThreads = useStore(s => (s.threadsByPath[f.path]?.length ?? 0) + (f.previousPath ? s.threadsByPath[f.previousPath]?.length ?? 0 : 0));
   return (
     <div
       className={`frow${current ? ' current' : ''}${hidden ? ' hidden-file' : ''}${isViewed(v) ? ' viewed' : ''}`}

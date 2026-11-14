@@ -69,34 +69,45 @@ export async function currentOids(ref: PrRef): Promise<{baseOid:string;headOid:s
   return {baseOid:pr.baseRefOid,headOid:pr.headRefOid};
 }
 function pending(pr: Raw, login: string): string | null { return pr.reviews.nodes.find((r: Raw) => r.author?.login === login)?.id ?? null; }
+const sameOids = (a: {baseOid:string;headOid:string}, b: {baseOid:string;headOid:string}) => a.baseOid === b.baseOid && a.headOid === b.headOid;
 /**
- * Every request starts as soon as its inputs exist. The REST file list and the GraphQL snapshot are not atomic:
- * callers must check currentOids() afterwards and treat a mismatch as "PR changed".
+ * REST and GraphQL reads are not atomic. The REST file list starts strictly after an oid read that must match the
+ * GraphQL snapshot; callers must still compare currentOids() afterwards (a later push => "PR changed").
  */
 export async function loadPr(ref: PrRef): Promise<PrData> {
   const prefix = `repos/${ref.owner}/${ref.repo}`;
   const filesUrl = (page: number) => `${prefix}/pulls/${ref.number}/files?per_page=100&page=${page}`;
-  const firstP = firstPage(ref);
-  const restP = rest<Raw[]>(filesUrl(1)).then(async first => {
-    const last = Number(/[?&]page=(\d+)>; rel="last"/.exec(first.link ?? '')?.[1] ?? 1);
-    const more = await Promise.all(Array.from({length:Math.max(0,Math.min(30,last)-1)},(_,i) => rest<Raw[]>(filesUrl(i+2))));
-    return [first,...more].flatMap(p => p.data);
-  });
-  restP.catch(() => {});
-  const {pr,viewer} = await firstP;
-  const [, rawFiles, compare] = await Promise.all([
-    paginate(ref,pr),
-    restP,
-    rest<Raw>(`${prefix}/compare/${pr.baseRefOid}...${pr.headRefOid}?per_page=1`),
-  ]);
-  const viewed = new Map<string,ViewedState>(pr.files.nodes.map((f: Raw) => [f.path,f.viewerViewedState]));
-  const counts = new Map<string,Raw>(pr.files.nodes.map((f: Raw) => [f.path,f]));
-  const files: PrFile[] = rawFiles.map(f => ({path:f.filename,...(f.previous_filename ? {previousPath:f.previous_filename}:{}),status:f.status,additions:counts.get(f.filename)?.additions ?? f.additions,deletions:counts.get(f.filename)?.deletions ?? f.deletions,...(f.patch !== undefined ? {patch:f.patch}:{}),viewed:viewed.get(f.filename) ?? 'UNVIEWED'}));
-  return {ref,id:pr.id,title:pr.title,url:pr.url,state:pr.state,isDraft:pr.isDraft,author:pr.author ?? null,viewer,baseRefName:pr.baseRefName,headRefName:pr.headRefName,baseOid:pr.baseRefOid,headOid:pr.headRefOid,mergeBaseOid:compare.data.merge_base_commit.sha,additions:pr.additions,deletions:pr.deletions,changedFiles:pr.changedFiles,files,threads:pr.reviewThreads.nodes.map(thread),pendingReviewId:pending(pr,viewer.login)};
+  for (let attempt = 0; ; attempt++) {
+    const firstP = firstPage(ref);
+    firstP.catch(() => {});
+    const before = await currentOids(ref);
+    const restP = rest<Raw[]>(filesUrl(1)).then(async first => {
+      const last = Number(/[?&]page=(\d+)>; rel="last"/.exec(first.link ?? '')?.[1] ?? 1);
+      const more = await Promise.all(Array.from({length:Math.max(0,Math.min(30,last)-1)},(_,i) => rest<Raw[]>(filesUrl(i+2))));
+      return [first,...more].flatMap(p => p.data);
+    });
+    restP.catch(() => {});
+    const {pr,viewer} = await firstP;
+    if (!sameOids(before,{baseOid:pr.baseRefOid,headOid:pr.headRefOid})) {
+      if (attempt < 2) continue;
+      throw new Error('PR kept changing while loading; reload');
+    }
+    const [, rawFiles, compare] = await Promise.all([
+      paginate(ref,pr),
+      restP,
+      rest<Raw>(`${prefix}/compare/${pr.baseRefOid}...${pr.headRefOid}?per_page=1`),
+    ]);
+    const viewed = new Map<string,ViewedState>(pr.files.nodes.map((f: Raw) => [f.path,f.viewerViewedState]));
+    const counts = new Map<string,Raw>(pr.files.nodes.map((f: Raw) => [f.path,f]));
+    const files: PrFile[] = rawFiles.map(f => ({path:f.filename,...(f.previous_filename ? {previousPath:f.previous_filename}:{}),status:f.status,additions:counts.get(f.filename)?.additions ?? f.additions,deletions:counts.get(f.filename)?.deletions ?? f.deletions,...(f.patch !== undefined ? {patch:f.patch}:{}),viewed:viewed.get(f.filename) ?? 'UNVIEWED'}));
+    return {ref,id:pr.id,title:pr.title,url:pr.url,state:pr.state,isDraft:pr.isDraft,author:pr.author ?? null,viewer,baseRefName:pr.baseRefName,headRefName:pr.headRefName,baseOid:pr.baseRefOid,headOid:pr.headRefOid,mergeBaseOid:compare.data.merge_base_commit.sha,additions:pr.additions,deletions:pr.deletions,changedFiles:pr.changedFiles,files,threads:pr.reviewThreads.nodes.map(thread),pendingReviewId:pending(pr,viewer.login)};
+  }
 }
 export async function refreshPr(ref: PrRef, known: {baseOid:string;headOid:string}): Promise<RefreshResult> {
   const {pr,viewer,changed} = await snapshot(ref,known);
   if (changed) return {changed:true,baseOid:pr.baseRefOid,headOid:pr.headRefOid};
+  const after = await currentOids(ref);
+  if (!sameOids(after,known)) return {changed:true,...after};
   return {changed:false,threads:pr.reviewThreads.nodes.map(thread),viewed:Object.fromEntries(pr.files.nodes.map((f: Raw) => [f.path,f.viewerViewedState])),pendingReviewId:pending(pr,viewer.login)};
 }
 export async function fetchBlobs(ref: PrRef, specs: BlobSpec[]): Promise<Map<string,BlobResult>> {

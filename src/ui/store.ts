@@ -3,11 +3,11 @@ import type {
   BlobResult, Category, Comment, HideRule, NewThread, PrData, PrFile, PrRef, ReviewEvent, Row, Thread, ViewedState,
 } from '../types.ts';
 import {
-  addThread, currentOids, deleteComment, fetchPatches, discardReview, ensurePendingReview, fetchBlobs, loadPr, refreshPr, replyThread,
-  resolveThread, setViewed, submitReview, updateComment,
+  addThread, currentOids, deleteComment, discardReview, ensurePendingReview, fetchBlobs, fetchPatches, loadPr,
+  refreshPr, replyThread, resolveThread, setViewed, submitReview, updateComment,
 } from '../lib/github.ts';
 import { categorize, folderKey, isHidden } from '../lib/categorize.ts';
-import { diffInWorker } from '../lib/diff.ts';
+import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
 
 export type ViewMode = 'unified' | 'split';
@@ -27,7 +27,7 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 export type ComposerTarget =
-  | { kind: 'line'; aIdx: number; bIdx: number }
+  | { kind: 'line'; a: Anchor; b: Anchor }
   | { kind: 'file'; quote?: string };
 
 export type Focus = { kind: 'category'; key: Category } | { kind: 'folder'; depth: number; key: string } | null;
@@ -36,23 +36,37 @@ export interface Toast { id: number; text: string; error?: boolean }
 
 export type BigDiff = 'loading' | { rows: Row[] } | { error: string };
 
+/** Path-keyed records are prototype-less so paths like "constructor" are safe keys. */
+export type Dict<T> = Record<string, T>;
+export const dict = <T,>(from?: Dict<T>): Dict<T> => Object.assign(Object.create(null), from);
+const put = <T,>(d: Dict<T>, k: string, v: T): Dict<T> => {
+  const n = dict(d);
+  n[k] = v;
+  return n;
+};
+const drop = <T,>(d: Dict<T>, k: string): Dict<T> => {
+  const n = dict(d);
+  delete n[k];
+  return n;
+};
+
 interface State {
   ref: PrRef | null;
   pr: PrData | null;
   loading: boolean;
   error: string | null;
-  viewed: Record<string, ViewedState>;
+  viewed: Dict<ViewedState>;
   threads: Thread[];
-  threadsByPath: Record<string, Thread[]>;
+  threadsByPath: Dict<Thread[]>;
   pendingReviewId: string | null;
-  blobs: Record<string, BlobResult | 'loading'>;
-  bigDiffs: Record<string, BigDiff>;
+  blobs: Dict<BlobResult | 'loading'>;
+  bigDiffs: Dict<BigDiff>;
   repoRules: HideRule[];
   prRules: HideRule[];
-  collapsed: Record<string, boolean>;
-  expansions: Record<string, Array<[number, number]>>;
-  composers: Record<string, ComposerTarget>;
-  selAnchor: { path: string; idx: number } | null;
+  collapsed: Dict<boolean>;
+  expansions: Dict<Array<[number, number]>>;
+  composers: Dict<ComposerTarget>;
+  selAnchor: { path: string; anchor: Anchor } | null;
   tab: 'overview' | 'diff';
   current: string | null;
   filter: string;
@@ -85,20 +99,28 @@ const write = (key: string, v: unknown) => {
   try { localStorage.setItem(key, JSON.stringify(v)); } catch { /* quota */ }
 };
 
+const prId = (r: PrRef) => `${r.owner}/${r.repo}#${r.number}`;
 const repoKey = (r: PrRef) => `ghr:rules:${r.owner}/${r.repo}`;
-const prKey = (r: PrRef) => `ghr:rules:${r.owner}/${r.repo}#${r.number}`;
+const prKey = (r: PrRef) => `ghr:rules:${prId(r)}`;
+/** localStorage key for unsent text, scoped to the open PR. */
+export const draftKey = (k: string) => {
+  const r = useStore.getState().ref;
+  return `ghr:draft:${r ? prId(r) : '-'}:${k}`;
+};
 
 const byPath = (threads: Thread[]) => {
-  const m: Record<string, Thread[]> = {};
-  for (const t of threads) (m[t.path] ||= []).push(t);
+  const m = dict<Thread[]>();
+  for (const t of threads) (m[t.path] ??= []).push(t);
   return m;
 };
 
+const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
+
 export const useStore = create<State>(() => ({
-  ref: null, pr: null, loading: false, error: null, viewed: {}, threads: [], threadsByPath: {}, pendingReviewId: null,
-  blobs: {}, bigDiffs: {}, repoRules: [], prRules: [], collapsed: {}, expansions: {}, composers: {}, selAnchor: null,
-  tab: 'diff', current: null, filter: '', focus: null, toasts: [], stale: false, revalidating: false, busy: 0, help: false,
-  settings: read('ghr:settings', DEFAULT_SETTINGS),
+  ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
+  pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
+  expansions: dict(), composers: dict(), selAnchor: null, tab: 'diff', current: null, filter: '', focus: null,
+  toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
 const set = useStore.setState;
@@ -112,11 +134,6 @@ export function toast(text: string, error = false) {
 }
 export const dismissToast = (id: number) => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) }));
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-async function busy<T>(fn: () => Promise<T>): Promise<T> {
-  set(s => ({ busy: s.busy + 1 }));
-  try { return await fn(); } finally { set(s => ({ busy: s.busy - 1 })); }
-}
 
 export function updateSettings(patch: Partial<Settings>) {
   const settings = { ...get().settings, ...patch };
@@ -162,26 +179,88 @@ export function pendingCount(s: Pick<State, 'threads' | 'pr'>) {
   return n;
 }
 
+/** Threads for a file, including those still recorded under its previous name. */
+export function fileThreads(s: Pick<State, 'threadsByPath'>, f: PrFile): Thread[] | undefined {
+  const a = s.threadsByPath[f.path];
+  const b = f.previousPath ? s.threadsByPath[f.previousPath] : undefined;
+  return b ? [...(a ?? []), ...b] : a;
+}
+
+// ---------- comment-write bookkeeping ----------
+// A server snapshot fetched while a comment write was in flight (or before it finished) may predate it.
+// Such snapshots must not replace local threads.
+
+let writeEpoch = 0;
+let writesInflight = 0;
+async function writing<T>(fn: () => Promise<T>): Promise<T> {
+  writesInflight++;
+  writeEpoch++;
+  set(s => ({ busy: s.busy + 1 }));
+  try {
+    return await fn();
+  } finally {
+    writesInflight--;
+    writeEpoch++;
+    set(s => ({ busy: s.busy - 1 }));
+  }
+}
+const threadsSafeSince = (epoch: number) => writesInflight === 0 && writeEpoch === epoch;
+
+// ---------- viewed bookkeeping ----------
+// Per path: the last state GitHub confirmed, the newest local intent (seq), at most one request in flight.
+
+const confirmed = new Map<string, ViewedState>();
+const viewedSeq = new Map<string, number>();
+const viewedInflight = new Set<string>();
+const viewedTouched = new Map<string, number>();
+let viewedQueue = new Map<string, { viewed: boolean; seq: number }>();
+let viewedTimer: ReturnType<typeof setTimeout> | null = null;
+
+function resetViewedBookkeeping() {
+  confirmed.clear();
+  viewedSeq.clear();
+  viewedInflight.clear();
+  viewedTouched.clear();
+  viewedQueue = new Map();
+  if (viewedTimer) clearTimeout(viewedTimer);
+  viewedTimer = null;
+}
+
+/** Server viewed states, applied only for paths the user has not touched since `since`. */
+function mergeServerViewed(cur: Dict<ViewedState>, server: Iterable<[string, ViewedState]>, since: number) {
+  const viewed = dict(cur);
+  for (const [p, v] of server) {
+    confirmed.set(p, v);
+    const busyPath = viewedInflight.has(p) || viewedQueue.has(p) || (viewedTouched.get(p) ?? -Infinity) >= since;
+    if (!busyPath) viewed[p] = v;
+  }
+  return viewed;
+}
+
 // ---------- loading ----------
 
 let loadSeq = 0;
 export async function load(ref: PrRef) {
   const seq = ++loadSeq;
+  const started = performance.now();
+  const epoch = writeEpoch;
+  resetViewedBookkeeping();
   set({
-    ref, loading: true, error: null, pr: null, blobs: {}, bigDiffs: {}, collapsed: {}, expansions: {}, composers: {},
+    ref, loading: true, error: null, pr: null, viewed: dict(), threads: [], threadsByPath: dict(), pendingReviewId: null,
+    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null,
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   });
-  const key = `${ref.owner}/${ref.repo}#${ref.number}`;
+  const key = prId(ref);
   const freshP = loadPr(ref);
   freshP.catch(() => {});
   const cached = await getPr(key);
   if (seq !== loadSeq) return;
-  if (cached) applyPr(cached, seq, true);
+  if (cached) applyPr(cached, seq, true, started, epoch);
   try {
     const pr = await freshP;
     if (seq !== loadSeq) return;
-    applyPr(pr, seq, false);
-    let final = get().pr ?? pr;
+    applyPr(pr, seq, false, started, epoch);
+    let final = get().pr!;
     if (final.files.some(missingPatch)) {
       try {
         const patches = await fetchPatches(ref);
@@ -195,7 +274,9 @@ export async function load(ref: PrRef) {
     }
     void putPr(key, final);
     const now = await currentOids(ref);
-    if (seq === loadSeq && (now.baseOid !== pr.baseOid || now.headOid !== pr.headOid)) set({ stale: true });
+    if (seq === loadSeq && (now.baseOid !== final.baseOid || now.headOid !== final.headOid)) set({ stale: true });
+    // comments written against the cached copy kept local threads; pick up the server's view once writes settle
+    else if (seq === loadSeq && !threadsSafeSince(epoch)) setTimeout(() => void refresh(), 1500);
   } catch (e) {
     if (seq !== loadSeq) return;
     if (cached) toast(`Showing cached copy; refresh failed: ${errText(e)}`, true);
@@ -218,10 +299,11 @@ function fillPatches(pr: PrData, patches: Map<string, string>): PrData {
   };
 }
 
-function applyPr(pr: PrData, seq: number, fromCache: boolean) {
+function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, epoch: number) {
   const prev = get().pr;
-  const headChanged = !prev || prev.headOid !== pr.headOid;
-  if (prev && !headChanged) {
+  const sameRev = !!prev && revision(prev) === revision(pr);
+  if (prev && sameRev) {
+    // patches filled from the whole-PR diff for this exact revision stay valid
     const old = new Map(prev.files.map(f => [f.path, f]));
     pr = {
       ...pr,
@@ -232,65 +314,58 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean) {
     };
   }
   set(s => {
-    const viewed = { ...s.viewed };
-    for (const f of pr.files) {
-      if (!prev || (!viewedInflight[f.path] && !viewedQueue.some(q => q.path === f.path) && !(f.path in viewedTouched))) {
-        viewed[f.path] = f.viewed;
-      }
-    }
-    const threads = prev ? mergeTemp(pr.threads, s.threads) : pr.threads;
+    const viewed = prev ? mergeServerViewed(s.viewed, pr.files.map(f => [f.path, f.viewed]), started) : (() => {
+      const v = dict<ViewedState>();
+      for (const f of pr.files) { v[f.path] = f.viewed; confirmed.set(f.path, f.viewed); }
+      return v;
+    })();
+    const keepLocal = prev && !threadsSafeSince(epoch);
+    const threads = keepLocal ? s.threads : mergeTemp(pr.threads, s.threads);
     return {
       pr, loading: false, revalidating: fromCache, viewed, threads, threadsByPath: byPath(threads),
-      pendingReviewId: prev && s.pendingReviewId && !pr.pendingReviewId ? s.pendingReviewId : pr.pendingReviewId,
+      pendingReviewId: keepLocal ? s.pendingReviewId : pr.pendingReviewId,
       current: s.current ?? pr.files[0]?.path ?? null,
-      ...(headChanged ? { blobs: {}, bigDiffs: {}, expansions: {} } : {}),
+      ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict() }),
     };
   });
-  document.title = `${pr.title} · #${pr.ref.number}`;
-  if (headChanged) void prefetchBlobs(seq);
+  if (typeof document !== "undefined") document.title = `${pr.title} · #${pr.ref.number}`;
+  if (!sameRev) void prefetchBlobs(seq);
 }
 
-const needsHeadBlob = (f: PrFile) =>
-  !!f.patch && f.status !== 'added' && f.status !== 'removed';
+const needsHeadBlob = (f: PrFile) => !!f.patch && f.status !== 'added' && f.status !== 'removed';
 
 async function prefetchBlobs(seq: number, only?: Set<string>) {
   const s0 = get();
   const pr = s0.pr!;
   const ref = pr.ref;
-  const valid = () => seq === loadSeq && get().pr?.headOid === pr.headOid;
-  // current-first ordering: stream order, hidden files last
+  const rev = revision(pr);
+  const valid = () => seq === loadSeq && !!get().pr && revision(get().pr!) === rev;
   const files = [...pr.files].sort((a, b) => Number(fileHidden(s0, a)) - Number(fileHidden(s0, b)));
   const todo = files.filter(f => needsHeadBlob(f) && (!only || only.has(f.path)));
   set(s => {
-    const blobs = { ...s.blobs };
+    const blobs = dict(s.blobs);
     for (const f of todo) blobs[f.path] = 'loading';
     return { blobs };
   });
   const chunks: PrFile[][] = [];
   for (let i = 0; i < todo.length; i += 40) chunks.push(todo.slice(i, i + 40));
   let next = 0;
+  const missing: BlobResult = { text: null, binary: false, truncated: false, missing: true };
   const worker = async () => {
     while (next < chunks.length) {
       const chunk = chunks[next++];
+      let res: Map<string, BlobResult> | null = null;
       try {
-        const res = await fetchBlobs(ref, chunk.map(f => ({ commit: pr.headOid, path: f.path })));
-        if (!valid()) return;
-        set(s => {
-          const blobs = { ...s.blobs };
-          for (const f of chunk) {
-            blobs[f.path] = res.get(`${pr.headOid}:${f.path}`) ?? { text: null, binary: false, truncated: false, missing: true };
-          }
-          return { blobs };
-        });
+        res = await fetchBlobs(ref, chunk.map(f => ({ commit: pr.headOid, path: f.path })));
       } catch (e) {
-        if (!valid()) return;
-        set(s => {
-          const blobs = { ...s.blobs };
-          for (const f of chunk) blobs[f.path] = { text: null, binary: false, truncated: false, missing: true };
-          return { blobs };
-        });
         console.warn('blob fetch failed', e);
       }
+      if (!valid()) return;
+      set(s => {
+        const blobs = dict(s.blobs);
+        for (const f of chunk) blobs[f.path] = res?.get(`${pr.headOid}:${f.path}`) ?? missing;
+        return { blobs };
+      });
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
@@ -298,7 +373,10 @@ async function prefetchBlobs(seq: number, only?: Set<string>) {
 
 export async function loadBigDiff(f: PrFile) {
   const pr = get().pr!;
-  set(s => ({ bigDiffs: { ...s.bigDiffs, [f.path]: 'loading' } }));
+  const rev = revision(pr);
+  const stillValid = () => !!get().pr && revision(get().pr!) === rev;
+  set(s => ({ bigDiffs: put(s.bigDiffs, f.path, 'loading' as BigDiff) }));
+  let result: BigDiff;
   try {
     const specs = [];
     const basePath = f.previousPath || f.path;
@@ -312,10 +390,11 @@ export async function loadBigDiff(f: PrFile) {
     if (a == null || b == null) throw new Error('binary, truncated or missing file');
     const rows = await diffInWorker(a, b);
     if (!rows) throw new Error('diff took too long');
-    set(s => ({ bigDiffs: { ...s.bigDiffs, [f.path]: { rows } } }));
+    result = { rows };
   } catch (e) {
-    set(s => ({ bigDiffs: { ...s.bigDiffs, [f.path]: { error: errText(e) } } }));
+    result = { error: errText(e) };
   }
+  if (stillValid()) set(s => ({ bigDiffs: put(s.bigDiffs, f.path, result) }));
 }
 
 let refreshing = false;
@@ -324,18 +403,18 @@ export async function refresh(manual = false) {
   if (!s.pr || refreshing || s.stale) return;
   refreshing = true;
   const started = performance.now();
+  const epoch = writeEpoch;
+  const pr0 = s.pr;
   try {
-    const r = await refreshPr(s.pr.ref, { baseOid: s.pr.baseOid, headOid: s.pr.headOid });
-    if (get().pr !== s.pr) return;
+    const r = await refreshPr(pr0.ref, { baseOid: pr0.baseOid, headOid: pr0.headOid });
+    if (get().pr !== pr0 && (!get().pr || revision(get().pr!) !== revision(pr0))) return;
     if (r.changed) {
       set({ stale: true });
       return;
     }
     set(st => {
-      const viewed = { ...st.viewed };
-      for (const [p, v] of Object.entries(r.viewed)) {
-        if (!viewedInflight[p] && !viewedQueue.some(q => q.path === p) && !((viewedTouched[p] ?? -1) >= started)) viewed[p] = v;
-      }
+      const viewed = mergeServerViewed(st.viewed, Object.entries(r.viewed), started);
+      if (!threadsSafeSince(epoch)) return { viewed };
       const threads = mergeTemp(r.threads, st.threads);
       return { viewed, threads, threadsByPath: byPath(threads), pendingReviewId: r.pendingReviewId };
     });
@@ -361,59 +440,75 @@ function mergeTemp(server: Thread[], local: Thread[]) {
 
 // ---------- viewed ----------
 
-const viewedSeq: Record<string, number> = {};
-const viewedInflight: Record<string, number> = {};
-const viewedTouched: Record<string, number> = {};
-let viewedQueue: Array<{ path: string; viewed: boolean; seq: number; prev: ViewedState }> = [];
-let viewedTimer: ReturnType<typeof setTimeout> | null = null;
-
 export function markViewed(paths: string[], viewed: boolean) {
   const s = get();
   if (!s.pr) return;
-  const next = { ...s.viewed };
-  const collapsed = { ...s.collapsed };
+  const next = dict(s.viewed);
+  const collapsed = dict(s.collapsed);
+  const now = performance.now();
   for (const p of paths) {
-    const prev = s.viewed[p] ?? 'UNVIEWED';
-    if (isViewed(prev) === viewed) continue;
+    if (isViewed(s.viewed[p]) === viewed) continue;
     next[p] = viewed ? 'VIEWED' : 'UNVIEWED';
     delete collapsed[p];
-    viewedTouched[p] = performance.now();
-    const seq = (viewedSeq[p] = (viewedSeq[p] ?? 0) + 1);
-    viewedQueue = viewedQueue.filter(q => q.path !== p);
-    viewedQueue.push({ path: p, viewed, seq, prev });
+    viewedTouched.set(p, now);
+    const seq = (viewedSeq.get(p) ?? 0) + 1;
+    viewedSeq.set(p, seq);
+    viewedQueue.set(p, { viewed, seq });
   }
   set({ viewed: next, collapsed });
+  scheduleViewedFlush();
+}
+
+function scheduleViewedFlush() {
   if (viewedTimer) clearTimeout(viewedTimer);
   viewedTimer = setTimeout(flushViewed, 150);
 }
 
 async function flushViewed() {
+  viewedTimer = null;
   const pr = get().pr;
-  const batch = viewedQueue;
-  viewedQueue = [];
-  if (!pr || !batch.length) return;
-  for (const q of batch) viewedInflight[q.path] = (viewedInflight[q.path] ?? 0) + 1;
+  if (!pr) return;
+  const batch: Array<{ path: string; viewed: boolean; seq: number }> = [];
+  for (const [path, q] of viewedQueue) {
+    if (viewedInflight.has(path)) continue;
+    // nothing to send if the intent equals what GitHub already has
+    if (isViewed(confirmed.get(path)) === q.viewed && confirmed.get(path) !== undefined) {
+      viewedQueue.delete(path);
+      continue;
+    }
+    batch.push({ path, ...q });
+  }
+  if (!batch.length) return;
+  for (const q of batch) {
+    viewedQueue.delete(q.path);
+    viewedInflight.add(q.path);
+  }
   let results: Array<{ path: string; ok: boolean }>;
   try {
     results = await setViewed(pr.id, batch.map(q => ({ path: q.path, viewed: q.viewed })));
   } catch {
     results = batch.map(q => ({ path: q.path, ok: false }));
   }
+  if (get().pr?.id !== pr.id) return;
   const ok = new Map(results.map(r => [r.path, r.ok]));
   const failed: string[] = [];
+  const now = performance.now();
   set(s => {
-    const viewed = { ...s.viewed };
+    const viewed = dict(s.viewed);
     for (const q of batch) {
-      viewedInflight[q.path]--;
-      viewedTouched[q.path] = performance.now();
-      if (ok.get(q.path) === false && viewedSeq[q.path] === q.seq) {
-        viewed[q.path] = q.prev;
+      viewedInflight.delete(q.path);
+      viewedTouched.set(q.path, now);
+      if (ok.get(q.path)) {
+        confirmed.set(q.path, q.viewed ? 'VIEWED' : 'UNVIEWED');
+      } else if (viewedSeq.get(q.path) === q.seq) {
+        viewed[q.path] = confirmed.get(q.path) ?? 'UNVIEWED';
         failed.push(q.path);
       }
     }
     return { viewed };
   });
   if (failed.length) toast(`Could not update viewed state of ${failed.length} file(s)`, true);
+  if (viewedQueue.size) scheduleViewedFlush();
 }
 
 // ---------- hide rules ----------
@@ -452,23 +547,19 @@ export function toggleFileHidden(f: PrFile) {
 // ---------- UI state ----------
 
 export function setCollapsed(path: string, collapsed: boolean) {
-  set(s => ({ collapsed: { ...s.collapsed, [path]: collapsed } }));
+  set(s => ({ collapsed: put(s.collapsed, path, collapsed) }));
 }
 
 export function expand(path: string, from: number, to: number) {
-  set(s => ({ expansions: { ...s.expansions, [path]: [...(s.expansions[path] ?? []), [from, to]] } }));
+  set(s => ({ expansions: put(s.expansions, path, [...(s.expansions[path] ?? []), [from, to] as [number, number]]) }));
 }
 
 export function openComposer(path: string, t: ComposerTarget) {
-  set(s => ({ composers: { ...s.composers, [path]: t } }));
+  set(s => ({ composers: put(s.composers, path, t) }));
 }
 
 export function closeComposer(path: string) {
-  set(s => {
-    const composers = { ...s.composers };
-    delete composers[path];
-    return { composers, selAnchor: s.selAnchor?.path === path ? null : s.selAnchor };
-  });
+  set(s => ({ composers: drop(s.composers, path), selAnchor: s.selAnchor?.path === path ? null : s.selAnchor }));
 }
 
 // ---------- comments ----------
@@ -490,6 +581,12 @@ function setThreads(fn: (t: Thread[]) => Thread[]) {
   });
 }
 
+/** Replace a temp item with the server's; if a refresh already brought the real one in, just drop the temp. */
+function swapTemp<T extends { id: string }>(list: T[], tempId: string, real: T): T[] {
+  if (list.some(x => x.id === real.id)) return list.filter(x => x.id !== tempId);
+  return list.map(x => (x.id === tempId ? real : x));
+}
+
 async function reviewId() {
   const s = get();
   const id = await ensurePendingReview({ id: s.pr!.id, headOid: s.pr!.headOid, pendingReviewId: s.pendingReviewId });
@@ -507,8 +604,8 @@ export async function createThread(t: NewThread): Promise<boolean> {
   };
   setThreads(ts => [...ts, temp]);
   try {
-    const real = await busy(async () => addThread(await reviewId(), t));
-    setThreads(ts => ts.map(x => (x.id === temp.id ? real : x)));
+    const real = await writing(async () => addThread(await reviewId(), t));
+    setThreads(ts => swapTemp(ts, temp.id, real));
     return true;
   } catch (e) {
     setThreads(ts => ts.filter(x => x.id !== temp.id));
@@ -523,8 +620,8 @@ export async function reply(threadId: string, body: string): Promise<boolean> {
     setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, comments: fn(t.comments) } : t)));
   patch(cs => [...cs, temp]);
   try {
-    const real = await busy(async () => replyThread(await reviewId(), threadId, body));
-    patch(cs => cs.map(c => (c.id === temp.id ? real : c)));
+    const real = await writing(async () => replyThread(await reviewId(), threadId, body));
+    patch(cs => swapTemp(cs, temp.id, real));
     return true;
   } catch (e) {
     patch(cs => cs.filter(c => c.id !== temp.id));
@@ -535,7 +632,7 @@ export async function reply(threadId: string, body: string): Promise<boolean> {
 
 export async function editComment(id: string, body: string): Promise<boolean> {
   try {
-    const real = await busy(() => updateComment(id, body));
+    const real = await writing(() => updateComment(id, body));
     setThreads(ts => ts.map(t => ({ ...t, comments: t.comments.map(c => (c.id === id ? { ...c, ...real } : c)) })));
     return true;
   } catch (e) {
@@ -545,14 +642,32 @@ export async function editComment(id: string, body: string): Promise<boolean> {
 }
 
 export async function removeComment(id: string) {
-  const before = get().threads;
+  const ts0 = get().threads;
+  const tIdx = ts0.findIndex(t => t.comments.some(c => c.id === id));
+  if (tIdx < 0) return;
+  const thread = ts0[tIdx];
+  const cIdx = thread.comments.findIndex(c => c.id === id);
+  const comment = thread.comments[cIdx];
   setThreads(ts => ts
-    .map(t => ({ ...t, comments: t.comments.filter(c => c.id !== id) }))
+    .map(t => (t.id === thread.id ? { ...t, comments: t.comments.filter(c => c.id !== id) } : t))
     .filter(t => t.comments.length));
   try {
-    await busy(() => deleteComment(id));
+    await writing(() => deleteComment(id));
   } catch (e) {
-    setThreads(() => before);
+    setThreads(ts => {
+      const at = ts.findIndex(t => t.id === thread.id);
+      if (at < 0) {
+        const out = [...ts];
+        out.splice(Math.min(tIdx, out.length), 0, { ...thread, comments: [comment] });
+        return out;
+      }
+      return ts.map(t => {
+        if (t.id !== thread.id || t.comments.some(c => c.id === id)) return t;
+        const comments = [...t.comments];
+        comments.splice(Math.min(cIdx, comments.length), 0, comment);
+        return { ...t, comments };
+      });
+    });
     toast(`Delete failed: ${errText(e)}`, true);
   }
 }
@@ -562,7 +677,7 @@ export async function setResolved(threadId: string, resolved: boolean) {
     setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, isResolved: v, viewerCanResolve: !v, viewerCanUnresolve: v } : t)));
   flip(resolved);
   try {
-    await busy(() => resolveThread(threadId, resolved));
+    await writing(() => resolveThread(threadId, resolved));
   } catch (e) {
     flip(!resolved);
     toast(`Failed: ${errText(e)}`, true);
@@ -571,10 +686,10 @@ export async function setResolved(threadId: string, resolved: boolean) {
 
 export async function submit(event: ReviewEvent, body: string): Promise<boolean> {
   try {
-    await busy(async () => submitReview(await reviewId(), event, body));
+    await writing(async () => submitReview(await reviewId(), event, body));
     set({ pendingReviewId: null });
     toast('Review submitted');
-    await refresh();
+    void refresh();
     return true;
   } catch (e) {
     toast(`Submit failed: ${errText(e)}`, true);
@@ -586,7 +701,7 @@ export async function discard(): Promise<boolean> {
   const id = get().pendingReviewId;
   if (!id) return true;
   try {
-    await busy(() => discardReview(id));
+    await writing(() => discardReview(id));
     set({ pendingReviewId: null });
     setThreads(ts => ts
       .map(t => ({ ...t, comments: t.comments.filter(c => c.state !== 'PENDING') }))

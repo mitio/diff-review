@@ -1,6 +1,6 @@
 import { memo, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import type { FileModel, Item, PrFile, Row, SplitItem, Thread } from '../types.ts';
-import { buildModel, parsePatch, splitPairs, threadRowIndex, validRange, view, wordDiff } from '../lib/diff.ts';
+import type { FileModel, Item, PrFile, Row, Side, SplitItem, Thread } from '../types.ts';
+import { buildModel, lineAnchor, parsePatch, splitPairs, threadRowIndex, validRange, view, wordDiff, type RangeCheck } from '../lib/diff.ts';
 import {
   ALL, closeComposer, expand, fileHidden, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
   toast, toggleFileHidden, useStore, type ComposerTarget,
@@ -26,7 +26,9 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   const collapsedOverride = useStore(s => s.collapsed[path]);
   const blob = useStore(s => s.blobs[path]);
   const bigDiff = useStore(s => s.bigDiffs[path]);
-  const threads = useStore(s => s.threadsByPath[path]) ?? EMPTY;
+  const own = useStore(s => s.threadsByPath[path]);
+  const prevName = useStore(s => (file.previousPath ? s.threadsByPath[file.previousPath] : undefined));
+  const threads = useMemo(() => (prevName ? [...(own ?? []), ...prevName] : own ?? EMPTY), [own, prevName]);
   const isCurrent = useStore(s => s.current === path);
   const hidden = useStore(s => fileHidden(s, file));
   const pr = useStore(s => s.pr)!;
@@ -150,14 +152,18 @@ function DiffBody({ file, model, threads, composer }: {
     return { m, orphans };
   }, [model, threads]);
 
-  const lineComposer = composer?.kind === 'line' ? composer : null;
+  const lineComposer = useMemo(
+    () => (composer?.kind === 'line' ? validRange(model, composer.a, composer.b) : null),
+    [composer, model],
+  );
+  const sel = lineComposer?.ok ? lineComposer : null;
 
   const items = useMemo(() => {
     const exp: Array<[number, number]> = [...stored];
     for (const i of byRow.m.keys()) exp.push([i, i]);
-    if (lineComposer) exp.push([lineComposer.aIdx, lineComposer.bIdx]);
+    if (sel) exp.push([sel.startIdx, sel.endIdx]);
     return view(model, context, exp);
-  }, [model, context, stored, byRow, lineComposer]);
+  }, [model, context, stored, byRow, sel]);
 
   const pairs = useMemo(() => splitPairs(items, model.rows), [items, model]);
   const partner = useMemo(() => {
@@ -175,10 +181,15 @@ function DiffBody({ file, model, threads, composer }: {
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
-  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: lineComposer, partner, split: viewMode === 'split' };
+  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, partner, split: viewMode === 'split' };
 
   return (
     <>
+      {lineComposer && !lineComposer.ok && (
+        <div className="file-threads">
+          <div className="fnote">{lineComposer.reason}</div>
+        </div>
+      )}
       {byRow.orphans.length > 0 && (
         <div className="file-threads">
           {byRow.orphans.map(t => <ThreadView key={t.id} thread={t} showLocation />)}
@@ -198,7 +209,7 @@ interface RowCtx {
   file: PrFile;
   model: FileModel;
   byRow: Map<number, Thread[]>;
-  composer: { aIdx: number; bIdx: number } | null;
+  composer: Extract<RangeCheck, { ok: true }> | null;
   partner: Map<number, number>;
   split: boolean;
 }
@@ -232,14 +243,14 @@ function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) 
 function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
   for (const idx of ids) {
     const ts = ctx.byRow.get(idx);
-    const isComposer = ctx.composer && ctx.composer.bIdx === idx;
+    const isComposer = ctx.composer && ctx.composer.endIdx === idx;
     if (!ts && !isComposer) continue;
     out.push(
       <tr className="inline" key={`x${idx}`}>
         <td colSpan={4}>
           <div className="box">
             {ts?.map(t => <ThreadView key={t.id} thread={t} />)}
-            {isComposer && <LineComposer ctx={ctx} aIdx={ctx.composer!.aIdx} bIdx={ctx.composer!.bIdx} />}
+            {isComposer && <LineComposer path={ctx.file.path} r={ctx.composer!} />}
           </div>
         </td>
       </tr>,
@@ -247,49 +258,56 @@ function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
   }
 }
 
-function LineComposer({ ctx, aIdx, bIdx }: { ctx: RowCtx; aIdx: number; bIdx: number }) {
-  const path = ctx.file.path;
-  const r = validRange(ctx.model, aIdx, bIdx);
-  if (!r.ok) return null;
-  const single = aIdx === bIdx;
+function LineComposer({ path, r }: { path: string; r: Extract<RangeCheck, { ok: true }> }) {
+  const single = r.startIdx === r.endIdx;
   const target = {
     path, body: '', subjectType: 'LINE' as const, line: r.line, side: r.side,
     ...(single ? {} : { startLine: r.startLine, startSide: r.startSide }),
   };
-  const label = single ? `line ${r.line}` : `lines ${r.startLine}–${r.line}`;
-  return <NewComment path={`${path}:${r.side}:${r.startLine}-${r.line}`} label={`Comment on ${label}`} target={target} onDone={() => closeComposer(path)} />;
+  const sideName = (x: Side) => (x === 'LEFT' ? 'old ' : '');
+  const label = single
+    ? `${sideName(r.side)}line ${r.line}`
+    : `${sideName(r.startSide)}line ${r.startLine} to ${sideName(r.side)}line ${r.line}`;
+  return (
+    <NewComment
+      path={`${path}:${r.startSide}${r.startLine}-${r.side}${r.line}`}
+      label={`Comment on ${label}`}
+      target={target}
+      onDone={() => closeComposer(path)}
+    />
+  );
 }
 
-function onNumClick(e: MouseEvent, idx: number, ctx: RowCtx) {
+function onNumClick(e: MouseEvent, idx: number, ctx: RowCtx, clicked: Side) {
   e.preventDefault();
   const path = ctx.file.path;
   const row = ctx.model.rows[idx];
   const s = useStore.getState();
-  const anchor = s.selAnchor;
-  if (e.shiftKey && anchor && anchor.path === path && anchor.idx !== idx) {
-    const a = Math.min(anchor.idx, idx), b = Math.max(anchor.idx, idx);
-    const r = validRange(ctx.model, a, b);
-    if (!r.ok) {
-      toast(r.reason, true);
-      return;
-    }
-    openComposer(path, { kind: 'line', aIdx: a, bIdx: b });
-    return;
-  }
-  if (row.hunk == null) {
-    const n = row.newNo ?? row.oldNo;
-    const quote = `\`L${n}\`${row.kind === 'del' ? ' (old)' : ''}\n> ${row.text.slice(0, 200)}\n\n`;
-    toast('GitHub only accepts line comments inside its diff hunks — commenting on the file instead.');
+  const prev = s.selAnchor;
+  const anchor = lineAnchor(row, clicked);
+  if (!anchor) {
+    const n = clicked === 'LEFT' ? row.oldNo ?? row.newNo : row.newNo ?? row.oldNo;
+    const quote = `\`L${n}\`${clicked === 'LEFT' || row.kind === 'del' ? ' (old)' : ''}\n> ${row.text.slice(0, 200)}\n\n`;
+    toast('GitHub only accepts line comments inside its diff hunks. Commenting on the file instead.');
     openComposer(path, { kind: 'file', quote });
     useStore.setState({ selAnchor: null });
     return;
   }
-  openComposer(path, { kind: 'line', aIdx: idx, bIdx: idx });
-  useStore.setState({ selAnchor: { path, idx } });
+  if (e.shiftKey && prev && prev.path === path) {
+    const r = validRange(ctx.model, prev.anchor, anchor);
+    if (!r.ok) {
+      toast(r.reason, true);
+      return;
+    }
+    openComposer(path, { kind: 'line', a: prev.anchor, b: anchor });
+    return;
+  }
+  openComposer(path, { kind: 'line', a: anchor, b: anchor });
+  useStore.setState({ selAnchor: { path, anchor } });
 }
 
 function inSel(ctx: RowCtx, idx: number | null) {
-  return idx != null && !!ctx.composer && idx >= ctx.composer.aIdx && idx <= ctx.composer.bIdx;
+  return idx != null && !!ctx.composer && idx >= ctx.composer.startIdx && idx <= ctx.composer.endIdx;
 }
 
 function Code({ row, idx, ctx }: { row: Row; idx: number; ctx: RowCtx }) {
@@ -319,8 +337,8 @@ const UnifiedRow = memo(function UnifiedRow({ idx, ctx }: { idx: number; ctx: Ro
   const nc = row.hunk == null ? ' nc' : '';
   return (
     <tr className={`${row.kind}${inSel(ctx, idx) ? ' sel' : ''}${row.noEol ? ' noeol' : ''}`}>
-      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx)}>{row.oldNo ?? ''}</td>
-      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx)}>{row.newNo ?? ''}</td>
+      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx, 'LEFT')}>{row.oldNo ?? ''}</td>
+      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx, 'RIGHT')}>{row.newNo ?? ''}</td>
       <td className="sign">{SIGN[row.kind]}</td>
       <td className="code"><Code row={row} idx={idx} ctx={ctx} /></td>
     </tr>
@@ -337,7 +355,7 @@ const SplitRow = memo(function SplitRow({ left, right, ctx }: { left: number | n
     const nc = row.hunk == null ? ' nc' : '';
     const noeol = row.noEol && (row.kind !== 'ctx' || isRight) ? ' noeol-c' : '';
     return [
-      <td key="n" className={`num ${k}${nc}`} onClick={e => onNumClick(e, idx, ctx)}>{no ?? ''}</td>,
+      <td key="n" className={`num ${k}${nc}`} onClick={e => onNumClick(e, idx, ctx, isRight ? 'RIGHT' : 'LEFT')}>{no ?? ''}</td>,
       <td key="c" className={`code ${k}${noeol}`}><Code row={row} idx={idx} ctx={ctx} /></td>,
     ];
   };

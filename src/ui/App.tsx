@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PrRef, ReviewEvent } from '../types.ts';
 import { parsePrUrl } from '../lib/github.ts';
 import {
-  ALL, discard, dismissToast, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings,
+  ALL, discard, dismissToast, draftKey, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings,
   useStore,
 } from './store.ts';
 import { Sidebar } from './Sidebar.tsx';
@@ -180,7 +180,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
   const pending = useStore(s => pendingCount(s));
   const hasDraft = useStore(s => !!s.pendingReviewId);
   const own = useStore(s => s.pr!.author?.login === s.pr!.viewer.login);
-  const [body, setBody] = useState(() => localStorage.getItem('ghr:draft:review-body') ?? '');
+  const [body, setBody] = useState(() => { try { return localStorage.getItem(draftKey('review-body')) ?? ''; } catch { return ''; } });
   const [event, setEvent] = useState<ReviewEvent>('COMMENT');
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -191,7 +191,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
   }, [onClose]);
   const save = (v: string) => {
     setBody(v);
-    try { if (v) localStorage.setItem('ghr:draft:review-body', v); else localStorage.removeItem('ghr:draft:review-body'); } catch { /* */ }
+    try { if (v) localStorage.setItem(draftKey('review-body'), v); else localStorage.removeItem(draftKey('review-body')); } catch { /* */ }
   };
   const go = async () => {
     setSending(true);
@@ -309,7 +309,7 @@ function useKeys() {
         case 'j': stepFile(1); break;
         case 'k': stepFile(-1); break;
         case 'v': toggleViewedCurrent(); break;
-        case 'x': if (s.current) useStore.setState({ collapsed: { ...s.collapsed, [s.current]: !(s.collapsed[s.current] ?? isViewed(s.viewed[s.current])) } }); break;
+        case 'x': if (s.current) setCollapsed(s.current, !(s.collapsed[s.current] ?? isViewed(s.viewed[s.current]))); break;
         case 's': updateSettings({ viewMode: st.viewMode === 'split' ? 'unified' : 'split' }); break;
         case '[': updateSettings({ context: CONTEXTS[Math.max(0, (i < 0 ? 3 : i) - 1)] }); break;
         case ']': updateSettings({ context: CONTEXTS[Math.min(CONTEXTS.length - 1, (i < 0 ? 3 : i) + 1)] }); break;
@@ -318,7 +318,7 @@ function useKeys() {
         case 'o': useStore.setState({ tab: 'overview' }); break;
         case 'd': useStore.setState({ tab: 'diff' }); break;
         case 'r': void refresh(true); break;
-        case 'c': if (s.current) { useStore.setState({ tab: 'diff', collapsed: { ...s.collapsed, [s.current]: false }, composers: { ...s.composers, [s.current]: { kind: 'file' } } }); } break;
+        case 'c': if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
         case '/': e.preventDefault(); document.getElementById('file-filter')?.focus(); break;
         case '?': useStore.setState({ help: !s.help }); break;
         case 'Escape': useStore.setState({ help: false }); break;
@@ -351,7 +351,9 @@ export function Home() {
       {err && <div className="del">{err}</div>}
       <div className="muted">
         Or replace <code style={{ display: 'inline' }}>https://github.com</code> with <code style={{ display: 'inline' }}>{origin}</code> in any PR URL.
-        Bookmarklet (drag to your bookmarks bar): <a href={bookmarklet}>Review in gh-review</a>
+        Bookmarklet (drag to your bookmarks bar):{' '}
+        {/* React blocks javascript: hrefs, so set it on the DOM node directly */}
+        <a ref={el => { el?.setAttribute('href', bookmarklet); }}>Review in gh-review</a>
       </div>
     </div>
   );

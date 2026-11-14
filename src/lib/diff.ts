@@ -154,30 +154,42 @@ export function wordDiff(a: string, b: string): { a: Seg[]; b: Seg[] } | null {
   return result;
 }
 
-export function validRange(model: FileModel, aIdx: number, bIdx: number): { ok: true; side: Side; startLine: number; line: number; startSide: Side } | { ok: false; reason: string } {
-  const a = model.rows[aIdx];
-  const b = model.rows[bIdx];
-  if (!a || !b || a.hunk === undefined || b.hunk === undefined) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
-  if (a.hunk !== b.hunk) return { ok: false, reason: 'Select lines in the same hunk.' };
-  const side: Side = a.kind === 'del' && b.kind === 'del' ? 'LEFT' : 'RIGHT';
-  const first = side === 'LEFT' ? a.oldNo : a.newNo;
-  const last = side === 'LEFT' ? b.oldNo : b.newNo;
-  if (first === undefined || last === undefined) return { ok: false, reason: 'Select lines on the same side.' };
-  return { ok: true, side, startSide: side, startLine: Math.min(first, last), line: Math.max(first, last) };
-}
+export interface Anchor { side: Side; line: number }
 
-export function lineAnchor(row: Row): { side: Side; line: number } | null {
+/** Anchor for a gutter click. del/add rows have one side; ctx rows take the side of the gutter that was clicked. */
+export function lineAnchor(row: Row, clicked: Side = 'RIGHT'): Anchor | null {
   if (row.hunk === undefined) return null;
-  const side = row.kind === 'del' ? 'LEFT' : 'RIGHT';
+  const side: Side = row.kind === 'del' ? 'LEFT' : row.kind === 'add' ? 'RIGHT' : clicked;
   const line = side === 'LEFT' ? row.oldNo : row.newNo;
   return line === undefined ? null : { side, line };
 }
 
+export function anchorIndex(model: FileModel, a: Anchor): number {
+  if (a.side === 'RIGHT') return model.rows.findIndex(r => r.kind !== 'del' && r.newNo === a.line);
+  const removed = model.rows.findIndex(r => r.kind === 'del' && r.oldNo === a.line);
+  return removed >= 0 ? removed : model.rows.findIndex(r => r.kind === 'ctx' && r.oldNo === a.line);
+}
+
+export type RangeCheck =
+  | { ok: true; startSide: Side; startLine: number; side: Side; line: number; startIdx: number; endIdx: number }
+  | { ok: false; reason: string };
+
+/** GitHub accepts a range when both ends are in the same patch hunk; the sides may differ. */
+export function validRange(model: FileModel, a: Anchor, b: Anchor): RangeCheck {
+  const ia = anchorIndex(model, a);
+  const ib = anchorIndex(model, b);
+  if (ia < 0 || ib < 0) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
+  const ha = model.rows[ia].hunk;
+  const hb = model.rows[ib].hunk;
+  if (ha === undefined || hb === undefined) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
+  if (ha !== hb) return { ok: false, reason: 'GitHub only accepts a range inside one diff hunk.' };
+  const [s, e] = ia <= ib ? [a, b] : [b, a];
+  return { ok: true, startSide: s.side, startLine: s.line, side: e.side, line: e.line, startIdx: Math.min(ia, ib), endIdx: Math.max(ia, ib) };
+}
+
 export function threadRowIndex(model: FileModel, thread: Thread): number {
   if (thread.subjectType === 'FILE' || thread.isOutdated || thread.line === null) return -1;
-  if (thread.side === 'RIGHT') return model.rows.findIndex(r => r.kind !== 'del' && r.newNo === thread.line);
-  const removed = model.rows.findIndex(r => r.kind === 'del' && r.oldNo === thread.line);
-  return removed >= 0 ? removed : model.rows.findIndex(r => r.kind === 'ctx' && r.oldNo === thread.line);
+  return anchorIndex(model, { side: thread.side, line: thread.line });
 }
 
 let worker: Worker | undefined;

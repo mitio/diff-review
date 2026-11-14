@@ -102,14 +102,19 @@ it('pairs delete/add runs and preserves context and gaps', () => {
 it('validates same-hunk and same-side ranges, anchors and threads', () => {
   const rows = parsePatch('@@ -1,3 +1,3 @@\n c\n-d\n+e\n f\n@@ -7 +7 @@\n g\n').hunks.flatMap(h => h.rows);
   const m = model([...rows, { kind: 'ctx', oldNo: 8, newNo: 8, text: 'gap' }]);
-  expect(validRange(m, 3, 0)).toEqual({ ok: true, side: 'RIGHT', startSide: 'RIGHT', startLine: 1, line: 3 });
-  expect(validRange(m, 1, 1)).toEqual({ ok: true, side: 'LEFT', startSide: 'LEFT', startLine: 2, line: 2 });
-  expect(validRange(m, 1, 2).ok).toBe(false);
-  expect(validRange(m, 0, 4).ok).toBe(false);
-  expect(validRange(m, 0, 5).ok).toBe(false);
-  expect(validRange(m, -1, 1).ok).toBe(false);
+  const R = (line: number) => ({ side: 'RIGHT' as const, line });
+  const L = (line: number) => ({ side: 'LEFT' as const, line });
+  expect(validRange(m, R(3), R(1))).toEqual({ ok: true, startSide: 'RIGHT', startLine: 1, side: 'RIGHT', line: 3, startIdx: 0, endIdx: 3 });
+  expect(validRange(m, L(2), L(2))).toMatchObject({ ok: true, startSide: 'LEFT', startLine: 2, side: 'LEFT', line: 2 });
+  expect(validRange(m, L(1), L(2))).toMatchObject({ ok: true, startSide: 'LEFT', startLine: 1, side: 'LEFT', line: 2 });
+  expect(validRange(m, L(2), R(2))).toMatchObject({ ok: true, startSide: 'LEFT', startLine: 2, side: 'RIGHT', line: 2 });
+  expect(validRange(m, R(1), R(7)).ok).toBe(false);
+  expect(validRange(m, R(1), R(8)).ok).toBe(false);
+  expect(validRange(m, R(1), R(900)).ok).toBe(false);
   expect(lineAnchor(rows[1])).toEqual({ side: 'LEFT', line: 2 });
   expect(lineAnchor(rows[2])).toEqual({ side: 'RIGHT', line: 2 });
+  expect(lineAnchor(rows[0], 'LEFT')).toEqual({ side: 'LEFT', line: 1 });
+  expect(lineAnchor(rows[0])).toEqual({ side: 'RIGHT', line: 1 });
   expect(lineAnchor(m.rows[5])).toBeNull();
   expect(threadRowIndex(m, thread({}))).toBe(2);
   expect(threadRowIndex(m, thread({ side: 'LEFT' }))).toBe(1);
