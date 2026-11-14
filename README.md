@@ -13,7 +13,7 @@ Requires Node 24+ and an authenticated [GitHub CLI](https://cli.github.com/) (`g
 there. The home page lists the last 50 PRs you opened, with their live state, CI and review decision.
 `npm run dev` runs Vite with hot reload on :5173.
 
-- **Draft review:** click a line number to comment, shift-click for a range, ⌘↵ adds the comment to your pending
+- **Draft review:** click a line number to comment, drag or shift-click for a range, ⌘↵ adds the comment to your pending
   review. Click **Review** to submit (Comment / Approve / Request changes) or discard. GitHub only accepts line
   comments inside its own diff hunks; clicking a line outside them starts a file comment that quotes the line.
 - **Conversation** (`t`): the PR description, top-level comments and review summaries. Comments posted there go out

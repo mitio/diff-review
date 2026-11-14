@@ -73,6 +73,8 @@ interface State {
   expansions: Dict<Array<[number, number]>>;
   composers: Dict<ComposerTarget>;
   selAnchor: { path: string; anchor: Anchor } | null;
+  /** line range being drag-selected; the composer opens on mouseup */
+  dragSel: { path: string; a: Anchor; b: Anchor } | null;
   tab: Tab;
   current: string | null;
   /** file to scroll to once it is rendered (from the URL) */
@@ -137,7 +139,7 @@ const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
 export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
-  expansions: dict(), composers: dict(), selAnchor: null, tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
+  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
   toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
@@ -306,7 +308,7 @@ export async function load(ref: PrRef) {
   set(s => ({
     ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
     pendingReviewId: null, checks: null, ...(samePr ? {} : { conv: null, current: null, reveal: null }),
-    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null,
+    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null,
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
   const freshP = loadPr(ref);

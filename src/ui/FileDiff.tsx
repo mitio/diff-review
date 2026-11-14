@@ -157,10 +157,11 @@ function DiffBody({ file, model, threads, composer, hlReady }: {
     return { m, orphans };
   }, [model, threads]);
 
-  const lineComposer = useMemo(
-    () => (composer?.kind === 'line' ? validRange(model, composer.a, composer.b) : null),
-    [composer, model],
-  );
+  const drag = useStore(s => (s.dragSel?.path === path ? s.dragSel : null));
+  const lineComposer = useMemo(() => {
+    const r = drag ?? (composer?.kind === 'line' ? composer : null);
+    return r ? validRange(model, r.a, r.b) : null;
+  }, [drag, composer, model]);
   const sel = lineComposer?.ok ? lineComposer : null;
 
   const items = useMemo(() => {
@@ -186,7 +187,7 @@ function DiffBody({ file, model, threads, composer, hlReady }: {
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
-  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, partner, split: viewMode === 'split', toks, hlOn };
+  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn };
 
   return (
     <>
@@ -215,6 +216,8 @@ interface RowCtx {
   model: FileModel;
   byRow: Map<number, Thread[]>;
   composer: Extract<RangeCheck, { ok: true }> | null;
+  /** the composer stays closed mid-drag so it can't shift rows under the cursor */
+  dragging: boolean;
   partner: Map<number, number>;
   split: boolean;
   toks: RowToks | undefined;
@@ -253,7 +256,7 @@ function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) 
 function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
   for (const idx of ids) {
     const ts = ctx.byRow.get(idx);
-    const isComposer = ctx.composer && ctx.composer.endIdx === idx;
+    const isComposer = ctx.composer && !ctx.dragging && ctx.composer.endIdx === idx;
     if (!ts && !isComposer) continue;
     out.push(
       <tr className="inline" key={`x${idx}`}>
@@ -288,7 +291,8 @@ function LineComposer({ path, r }: { path: string; r: Extract<RangeCheck, { ok: 
   );
 }
 
-function onNumClick(e: MouseEvent, idx: number, ctx: RowCtx, clicked: Side) {
+function onNumDown(e: MouseEvent<HTMLElement>, idx: number, ctx: RowCtx, clicked: Side) {
+  if (e.button !== 0) return;
   e.preventDefault();
   const path = ctx.file.path;
   const row = ctx.model.rows[idx];
@@ -312,8 +316,32 @@ function onNumClick(e: MouseEvent, idx: number, ctx: RowCtx, clicked: Side) {
     openComposer(path, { kind: 'line', a: prev.anchor, b: anchor });
     return;
   }
-  openComposer(path, { kind: 'line', a: anchor, b: anchor });
-  useStore.setState({ selAnchor: { path, anchor } });
+  useStore.setState({ selAnchor: { path, anchor }, dragSel: { path, a: anchor, b: anchor } });
+  startDrag(e.currentTarget, ctx.model);
+}
+
+/** Cells carry `data-idx` (and `data-side` where the side isn't implied by the row). */
+function startDrag(cell: HTMLElement, model: FileModel) {
+  const section = cell.closest('section.file');
+  const onOver = (ev: globalThis.MouseEvent) => {
+    const td = (ev.target as Element).closest?.<HTMLElement>('td[data-idx]');
+    const d = useStore.getState().dragSel;
+    if (!td || !d || td.closest('section.file') !== section) return;
+    const row = model.rows[Number(td.dataset.idx)];
+    const b = row && lineAnchor(row, (td.dataset.side as Side | undefined) ?? d.a.side);
+    if (!b || (b.side === d.b.side && b.line === d.b.line) || !validRange(model, d.a, b).ok) return;
+    useStore.setState({ dragSel: { ...d, b } });
+  };
+  const onUp = () => {
+    document.removeEventListener('mouseover', onOver);
+    window.removeEventListener('mouseup', onUp);
+    const d = useStore.getState().dragSel;
+    if (!d) return;
+    useStore.setState({ dragSel: null });
+    openComposer(d.path, { kind: 'line', a: d.a, b: d.b });
+  };
+  document.addEventListener('mouseover', onOver);
+  window.addEventListener('mouseup', onUp);
 }
 
 function inSel(ctx: RowCtx, idx: number | null) {
@@ -349,10 +377,10 @@ const UnifiedRow = memo(function UnifiedRow({ idx, ctx }: { idx: number; ctx: Ro
   const nc = row.hunk == null ? ' nc' : '';
   return (
     <tr className={`${row.kind}${inSel(ctx, idx) ? ' sel' : ''}${row.noEol ? ' noeol' : ''}`}>
-      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx, 'LEFT')}>{row.oldNo ?? ''}</td>
-      <td className={`num${nc}`} onClick={e => onNumClick(e, idx, ctx, 'RIGHT')}>{row.newNo ?? ''}</td>
-      <td className="sign">{SIGN[row.kind]}</td>
-      <td className="code"><Code row={row} idx={idx} ctx={ctx} /></td>
+      <td className={`num${nc}`} data-idx={idx} data-side="LEFT" onMouseDown={e => onNumDown(e, idx, ctx, 'LEFT')}>{row.oldNo ?? ''}</td>
+      <td className={`num${nc}`} data-idx={idx} data-side="RIGHT" onMouseDown={e => onNumDown(e, idx, ctx, 'RIGHT')}>{row.newNo ?? ''}</td>
+      <td className="sign" data-idx={idx}>{SIGN[row.kind]}</td>
+      <td className="code" data-idx={idx}><Code row={row} idx={idx} ctx={ctx} /></td>
     </tr>
   );
 });
@@ -366,9 +394,10 @@ const SplitRow = memo(function SplitRow({ left, right, ctx }: { left: number | n
     const k = row.kind === 'ctx' ? '' : row.kind;
     const nc = row.hunk == null ? ' nc' : '';
     const noeol = row.noEol && (row.kind !== 'ctx' || isRight) ? ' noeol-c' : '';
+    const side = isRight ? 'RIGHT' : 'LEFT';
     return [
-      <td key="n" className={`num ${k}${nc}`} onClick={e => onNumClick(e, idx, ctx, isRight ? 'RIGHT' : 'LEFT')}>{no ?? ''}</td>,
-      <td key="c" className={`code ${k}${noeol}`}><Code row={row} idx={idx} ctx={ctx} pane={isRight ? 'right' : 'left'} /></td>,
+      <td key="n" className={`num ${k}${nc}`} data-idx={idx} data-side={side} onMouseDown={e => onNumDown(e, idx, ctx, side)}>{no ?? ''}</td>,
+      <td key="c" className={`code ${k}${noeol}`} data-idx={idx} data-side={side}><Code row={row} idx={idx} ctx={ctx} pane={isRight ? 'right' : 'left'} /></td>,
     ];
   };
   return (
