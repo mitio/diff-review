@@ -2,6 +2,10 @@
   "name": "gh-review",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "vite build && node server/server.ts",
     "serve": "node server/server.ts",
@@ -13,6 +17,7 @@
   "dependencies": {
     "diff": "^9.0.0",
     "dompurify": "^3.4.17",
+    "lowlight": "3.3.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.1.0"

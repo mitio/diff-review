@@ -1,5 +1,5 @@
-import { memo, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
-import type { FileModel, Item, PrFile, Row, Side, SplitItem, Thread } from '../types.ts';
+import { memo, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
+import type { FileModel, Item, PrFile, Row, Seg, Side, SplitItem, Thread } from '../types.ts';
 import { buildModel, lineAnchor, parsePatch, splitPairs, threadRowIndex, validRange, view, wordDiff, type RangeCheck } from '../lib/diff.ts';
 import {
   ALL, closeComposer, expand, fileHidden, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
@@ -8,6 +8,8 @@ import {
 import { Lazy } from './Lazy.tsx';
 import { NewComment, ThreadView } from './Thread.tsx';
 import { StatusLetter } from './bits.tsx';
+import { requestHighlight, useHighlight, type RowToks } from './hl.ts';
+import type { Tok } from '../lib/languages.ts';
 
 const EMPTY: never[] = [];
 const CHUNK = 400;
@@ -42,7 +44,8 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
     if (!file.patch) return null;
     const text = blob && blob !== 'loading' && !blob.binary && !blob.truncated && !blob.missing ? blob.text : null;
     return buildModel(file, parsed(file), text);
-  }, [file, blob, bigDiff]);
+    // keyed on content, not the file object: a fresh snapshot of the same revision must keep the model (and its highlighting)
+  }, [file.path, file.patch, file.status, blob, bigDiff]);
 
   const changed = file.additions + file.deletions;
   const fileThreads = threads.filter(t => t.subjectType === 'FILE' || t.isOutdated || t.line == null);
@@ -51,7 +54,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   let body: ReactNode = null;
   if (!collapsed) {
     if (model && (changed <= BIG || forceBig)) {
-      body = <DiffBody file={file} model={model} threads={lineThreads} composer={composer} />;
+      body = <DiffBody file={file} model={model} threads={lineThreads} composer={composer} hlReady={blob !== 'loading'} />;
     } else if (model) {
       body = (
         <div className="fnote">
@@ -128,10 +131,12 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   );
 });
 
-function DiffBody({ file, model, threads, composer }: {
-  file: PrFile; model: FileModel; threads: Thread[]; composer: ComposerTarget | undefined;
+function DiffBody({ file, model, threads, composer, hlReady }: {
+  file: PrFile; model: FileModel; threads: Thread[]; composer: ComposerTarget | undefined; hlReady: boolean;
 }) {
   const path = file.path;
+  const hlOn = useStore(s => s.settings.highlight) && hlReady;
+  const toks = useHighlight(model, path, hlOn);
   const viewMode = useStore(s => s.settings.viewMode);
   const ctxSetting = useStore(s => s.settings.context);
   const stored = useStore(s => s.expansions[path]) ?? EMPTY;
@@ -181,7 +186,7 @@ function DiffBody({ file, model, threads, composer }: {
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
-  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, partner, split: viewMode === 'split' };
+  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, partner, split: viewMode === 'split', toks, hlOn };
 
   return (
     <>
@@ -212,9 +217,14 @@ interface RowCtx {
   composer: Extract<RangeCheck, { ok: true }> | null;
   partner: Map<number, number>;
   split: boolean;
+  toks: RowToks | undefined;
+  hlOn: boolean;
 }
 
 function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) {
+  useEffect(() => {
+    if (ctx.hlOn) requestHighlight(ctx.model, ctx.file.path, true);
+  }, [ctx.model, ctx.file.path, ctx.hlOn]);
   const out: ReactNode[] = [];
   for (const it of items) {
     if (it.kind === 'gap') {
@@ -310,18 +320,20 @@ function inSel(ctx: RowCtx, idx: number | null) {
   return idx != null && !!ctx.composer && idx >= ctx.composer.startIdx && idx <= ctx.composer.endIdx;
 }
 
-function Code({ row, idx, ctx }: { row: Row; idx: number; ctx: RowCtx }) {
-  let content: ReactNode = row.text;
+/** `pane`: which file the cell shows; unified rows use the old file only for deletions. */
+function Code({ row, idx, ctx, pane }: { row: Row; idx: number; ctx: RowCtx; pane?: 'left' | 'right' }) {
+  let segs: Seg[] | null = null;
   const p = ctx.partner.get(idx);
   if (p != null && row.kind !== 'ctx') {
     const other = ctx.model.rows[p];
     const w = row.kind === 'del' ? wordDiff(row.text, other.text) : wordDiff(other.text, row.text);
-    if (w) {
-      const segs = row.kind === 'del' ? w.a : w.b;
-      const Tag = row.kind === 'del' ? 'del' : 'ins';
-      content = segs.map((s, i) => (s.changed ? <Tag key={i}>{s.text}</Tag> : s.text));
-    }
+    if (w) segs = row.kind === 'del' ? w.a : w.b;
+    if (segs && segs.reduce((n, x) => n + x.text.length, 0) !== row.text.length) segs = null;
   }
+  const side = pane === 'left' || (!pane && row.kind === 'del') ? ctx.toks?.a : ctx.toks?.b;
+  let toks = side?.[idx] ?? null;
+  if (toks && toks.reduce((n, t) => n + t[0], 0) !== row.text.length) toks = null;
+  const content = renderLine(row.text, toks, segs, row.kind === 'del' ? 'del' : 'ins');
   return (
     <>
       {content}
@@ -356,7 +368,7 @@ const SplitRow = memo(function SplitRow({ left, right, ctx }: { left: number | n
     const noeol = row.noEol && (row.kind !== 'ctx' || isRight) ? ' noeol-c' : '';
     return [
       <td key="n" className={`num ${k}${nc}`} onClick={e => onNumClick(e, idx, ctx, isRight ? 'RIGHT' : 'LEFT')}>{no ?? ''}</td>,
-      <td key="c" className={`code ${k}${noeol}`}><Code row={row} idx={idx} ctx={ctx} /></td>,
+      <td key="c" className={`code ${k}${noeol}`}><Code row={row} idx={idx} ctx={ctx} pane={isRight ? 'right' : 'left'} /></td>,
     ];
   };
   return (
@@ -387,4 +399,30 @@ function GapRow({ gap, path, cols }: { gap: Extract<Item, { kind: 'gap' }>; path
       </td>
     </tr>
   );
+}
+
+/** Syntax tokens intersected with word-diff segments: changed runs wrap the token spans they cover. */
+function renderLine(text: string, toks: Tok[] | null, segs: Seg[] | null, Tag: 'ins' | 'del'): ReactNode {
+  if (!toks) return segs ? segs.map((s, i) => (s.changed ? <Tag key={i}>{s.text}</Tag> : s.text)) : text;
+  const span = (from: number, to: number, cls: string, key: number) =>
+    cls ? <span key={key} className={cls}>{text.slice(from, to)}</span> : text.slice(from, to);
+  if (!segs) {
+    let at = 0;
+    return toks.map(([n, cls], i) => span(at, (at += n), cls, i));
+  }
+  const out: ReactNode[] = [];
+  let ti = 0, tEnd = toks[0]?.[0] ?? 0, at = 0, key = 0;
+  for (const seg of segs) {
+    const segEnd = at + seg.text.length;
+    const parts: ReactNode[] = [];
+    while (at < segEnd) {
+      while (tEnd <= at && ti < toks.length - 1) tEnd += toks[++ti][0];
+      const to = Math.min(segEnd, tEnd);
+      parts.push(span(at, to, toks[ti][1], key++));
+      at = to;
+    }
+    if (seg.changed) out.push(<Tag key={key++}>{parts}</Tag>);
+    else out.push(...parts);
+  }
+  return out;
 }

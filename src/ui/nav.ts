@@ -1,24 +1,28 @@
 import { isViewed, markViewed, setCollapsed, streamFiles, useStore } from './store.ts';
+import { markFileIntent } from './router.ts';
 
 export const mainEl = () => document.querySelector<HTMLElement>('.main');
 const fileEl = (path: string) => mainEl()?.querySelector<HTMLElement>(`.file[data-path="${CSS.escape(path)}"]`) ?? null;
 
 let spyLock = 0;
 
-export function scrollToFile(path: string) {
+export function scrollToFile(path: string): boolean {
   const main = mainEl();
   const el = fileEl(path);
-  if (!main || !el) return;
+  if (!main || !el) return false;
   spyLock = performance.now() + 150;
   main.scrollTop = el.offsetTop - 8;
   useStore.setState({ current: path });
+  return true;
 }
 
+/** A deliberate jump (click): gets its own browser-history entry. */
 export function goToFile(path: string, expandIt = true) {
   const s = useStore.getState();
+  if (path !== s.current) markFileIntent();
   if (expandIt && s.collapsed[path] !== false && isViewed(s.viewed[path])) setCollapsed(path, false);
-  if (s.tab !== 'diff') useStore.setState({ tab: 'diff' });
-  requestAnimationFrame(() => scrollToFile(path));
+  // the diff stream scrolls once the block exists (it may first need revealing past filters or hide rules)
+  useStore.setState({ tab: 'diff', pendingFile: path });
 }
 
 export function stepFile(dir: 1 | -1) {

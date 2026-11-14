@@ -297,3 +297,68 @@ Since the plan: the REST file list truncates large PRs (0/0, no patch), so per-f
 Missing patches come from the whole-PR `.diff` (`/api/diff/...`), fetched after first paint. A cached PR snapshot
 in IndexedDB gives ~0.3 s repeat visits (stale-while-revalidate). Overview is an overlay so the diff stream stays
 mounted.
+
+## v2 (2026-11-14): highlighting, CI, conversation, URL state, recent PRs, publish
+
+Verified via the `gh` OAuth token: `commits(last:1){nodes{commit{oid statusCheckRollup{state contexts{...on CheckRun|StatusContext}}}}}`
+returns check runs and legacy statuses; `comments` (IssueComment) and `reviews(states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED])`
+return `viewerCanUpdate/viewerCanDelete`, `url`, `bodyHTML`.
+
+**Routing and URL state** (`src/ui/router.ts`). Client-side routing with `history.pushState`; the Home ↔ PR switch never reloads the page.
+- `/` home; `/:o/:r/pull/:n` diff; `/:o/:r/pull/:n/overview`; `/:o/:r/pull/:n/conversation`.
+- Query: `only=cat:<category>` or `only=dir:<depth>:<folder>`, `q=<filter>`, `file=<path>`.
+- Store → URL by subscription. Push when the PR, tab or focus changes, or when an explicit file jump (sidebar/overview click) flags intent;
+  replace when only the filter text or the scroll-spy's current file changed (j/k and scrolling must not flood history).
+- popstate → parse → apply to the store with sync suppressed. A different PR → `load()`. A `file` param differing from `current` →
+  scroll there; on first load, scroll once the file block exists.
+- Global preferences (unified/split, context, font size) stay in localStorage, not the URL: Back must not flip view settings.
+
+**Recent PRs** (`src/lib/recent.ts`). localStorage `ghr:recent`, ≤ 50 entries, most recently opened first. Upsert-and-move-to-front on
+each `load()` (opening); metadata (title, state, counts, viewed count, headOid) refreshed in place on later snapshots and viewed
+toggles. Home lists them (title → local route, repo#n, author avatar + login, state, files/+/−, viewed progress, opened ago, GitHub ↗,
+remove ×) and refreshes them with one aliased GraphQL query (state, isDraft, title, headRefOid, reviewDecision, rollup state), tolerating
+per-alias errors; a head oid different from the stored one shows "new commits".
+
+**CI status** (`fetchChecks`). Head commit's rollup + contexts (pages of 100, ≤ 5 pages). Applied only if the returned commit oid equals
+`pr.headOid` and the load/revision is still current. Fetched after load, on refresh, and every 30 s while any check is pending and the
+tab is visible. Buckets: CheckRun not COMPLETED → pending; SUCCESS/NEUTRAL/SKIPPED → ok; other conclusions → fail. StatusContext
+SUCCESS → ok, PENDING/EXPECTED → pending, FAILURE/ERROR → fail. TopBar chip (colour by worst bucket, counts) → popover listing checks,
+failing first, with app/workflow, duration and a details link.
+
+**Conversation** (tab, key `t`, overlay like Overview so the diff stays mounted). PR description, issue comments and submitted reviews
+merged by time. Reviews with an empty body and state COMMENTED are omitted (containers of inline comments). Composer posts
+immediately with `addComment(subjectId: pr.id)` (labelled as such, separate from the draft review). Edit/delete own comments with
+`updateIssueComment` / `deleteIssueComment`. Optimistic temp entry; a fetched conversation is applied only when no conversation write
+is in flight and none completed since the fetch started; otherwise it is refetched once writes settle. Comments/reviews paginate
+(≤ 10 pages of 100).
+
+**Syntax highlighting** (lowlight 3 = highlight.js 11 `common` languages + a few extras, in `src/lib/hl.worker.ts`). Per FileModel, the
+old stream (ctx + del rows) and the new stream (ctx + add rows) are highlighted as whole texts so multi-line constructs work, then
+split into per-line `[length, className][]` tokens; del rows take old-stream tokens, ctx/add rows new-stream tokens. Gaps in
+incomplete models are accepted as context breaks. Language from extension/filename; unknown → plain. Skip streams > 512 KB.
+Main thread: one job in flight, visible files (a chunk mounted) first, results cached per FileModel (WeakMap) and published through
+a subscription so only that file re-renders. Rendering intersects tokens with word-diff segments. Light/dark token palettes as CSS
+variables. Setting `highlight` (default on, key `h`).
+
+**Home button**: ⌂ at the left of the TopBar, client-side navigation to `/`.
+
+**Publishing**: public `mitio/gh-review`. Remove organisation-specific references from files and history (rewrite + re-sign), add an
+MIT LICENSE, README covering the new features.
+
+### v2 plan-review outcomes (Sol @ xhigh, 9 findings, all accepted)
+
+1. Client-side PR switching made late write completions land on the next PR (A's pending review id installed on B).
+   Every write captures the PR key and touches state only if that PR is still open; editors resolve their draft key
+   at mount.
+2. A → B → A lost viewed-write ordering. Viewed books live in a per-PR map; a book also keeps the newest local state
+   per path, which seeds `viewed` when the PR is reopened.
+3. A jump target excluded by focus, filter or hide rules never scrolled. Jumps go through `pendingFile`; a file of the
+   PR that the stream excludes is `reveal`ed (shown regardless of filters); a path not in the PR toasts and clears.
+4. Conversation/check fetches are dropped unless their load and request sequence are still current (already so in
+   code; covered by a test).
+5. Submitting a review bumps the conversation epoch and refetches it.
+6. Context rows carry tokens from both files (`{a, b}`); split view picks by pane, unified uses `a` only for deletions.
+7. Highlighting has a 1.5 s deadline per file; past it the worker is replaced and the file stays plain.
+8. The CI summary and polling use GitHub's aggregate counts (`checkRunCountsByState`, `statusContextCountsByState`),
+   so a capped list can't read green.
+9. Conversation loads newest first (`last/before`, ≤ 10 pages each) and says when older items exist.

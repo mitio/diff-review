@@ -151,3 +151,57 @@ export interface NewThread {
   startLine?: number;
   startSide?: Side;
 }
+
+export type CheckBucket = 'ok' | 'fail' | 'pending' | 'skipped';
+export interface Check {
+  name: string;
+  /** app or workflow name */
+  source: string | null;
+  bucket: CheckBucket;
+  /** raw status/conclusion for the tooltip */
+  detail: string;
+  url: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  required: boolean;
+}
+/** `counts` and `state` cover every context, even when `checks` is capped. */
+export interface Checks { oid: string; state: string | null; checks: Check[]; total: number; counts: Record<CheckBucket, number> }
+
+export interface IssueComment {
+  id: string;
+  body: string;
+  bodyHTML: string;
+  createdAt: string;
+  author: User | null;
+  url: string;
+  viewerCanUpdate: boolean;
+  viewerCanDelete: boolean;
+}
+export interface ReviewSummary {
+  id: string;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | string;
+  body: string;
+  bodyHTML: string;
+  submittedAt: string;
+  author: User | null;
+  url: string;
+}
+export interface Conversation {
+  body: string;
+  bodyHTML: string;
+  createdAt: string;
+  comments: IssueComment[];
+  reviews: ReviewSummary[];
+  /** older comments/reviews exist beyond what was loaded (newest first) */
+  truncated: boolean;
+}
+
+export interface RecentStatus {
+  title: string;
+  state: string;
+  isDraft: boolean;
+  headOid: string;
+  reviewDecision: string | null;
+  ci: string | null;
+}

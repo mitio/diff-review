@@ -11,28 +11,32 @@ DOMPurify.addHook('afterSanitizeAttributes', node => {
   }
 });
 
-const loadDraft = (k: string) => {
-  try { return localStorage.getItem(draftKey(k)); } catch { return null; }
+/** `key` is a full draftKey(), resolved when the editor mounts so a late save can't land on another PR. */
+const loadDraft = (key: string) => {
+  try { return localStorage.getItem(key); } catch { return null; }
 };
-const saveDraft = (k: string, v: string) => {
+const saveDraft = (key: string, v: string) => {
   try {
-    if (v) localStorage.setItem(draftKey(k), v);
-    else localStorage.removeItem(draftKey(k));
+    if (v) localStorage.setItem(key, v);
+    else localStorage.removeItem(key);
   } catch { /* ignore */ }
 };
 
-function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, onCancel }: {
+export function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, onCancel, autoFocus = true }: {
   draftId: string;
+  autoFocus?: boolean;
   initial?: string;
   placeholder?: string;
   submitLabel: string;
   onSubmit: (body: string) => Promise<boolean>;
   onCancel: () => void;
 }) {
-  const [text, setText] = useState(() => loadDraft(draftId) ?? initial ?? '');
+  const [key] = useState(() => draftKey(draftId));
+  const [text, setText] = useState(() => loadDraft(key) ?? initial ?? '');
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
+    if (!autoFocus) return;
     const el = ref.current!;
     el.focus({ preventScroll: true });
     el.setSelectionRange(el.value.length, el.value.length);
@@ -42,10 +46,11 @@ function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, onCancel
     const body = text.trim();
     if (!body || sending) return;
     setSending(true);
-    saveDraft(draftId, '');
+    saveDraft(key, '');
     const ok = await onSubmit(body);
     setSending(false);
-    if (!ok) saveDraft(draftId, text);
+    if (!ok) saveDraft(key, text);
+    else setText('');
   };
   return (
     <div className="composer" onClick={e => e.stopPropagation()}>
@@ -55,7 +60,7 @@ function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, onCancel
         placeholder={placeholder ?? 'Leave a comment (Markdown). ⌘↵ to add, Esc to cancel'}
         onChange={e => {
           setText(e.target.value);
-          saveDraft(draftId, e.target.value);
+          saveDraft(key, e.target.value);
         }}
         onKeyDown={e => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -63,7 +68,7 @@ function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, onCancel
             void send();
           } else if (e.key === 'Escape') {
             e.preventDefault();
-            if (!text.trim() || text === initial) saveDraft(draftId, '');
+            if (!text.trim() || text === initial) saveDraft(key, '');
             onCancel();
           }
         }}
@@ -102,7 +107,7 @@ export function NewComment({ path, label, initial, target, onDone }: {
   );
 }
 
-const Body = memo(function Body({ c }: { c: Comment }) {
+export const Body = memo(function Body({ c }: { c: Pick<Comment, 'body' | 'bodyHTML'> }) {
   if (!c.bodyHTML) return <div className="md" style={{ whiteSpace: 'pre-wrap' }}>{c.body}</div>;
   return <div className="md" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(c.bodyHTML) }} />;
 });

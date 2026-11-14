@@ -1,11 +1,14 @@
 import { create } from 'zustand';
 import type {
-  BlobResult, Category, Comment, HideRule, NewThread, PrData, PrFile, PrRef, ReviewEvent, Row, Thread, ViewedState,
+  BlobResult, Category, Checks, Comment, Conversation, HideRule, IssueComment, NewThread, PrData, PrFile, PrRef, ReviewEvent, Row,
+  Thread, ViewedState,
 } from '../types.ts';
 import {
-  addThread, currentOids, deleteComment, discardReview, ensurePendingReview, fetchBlobs, fetchPatches, loadPr,
-  refreshPr, replyThread, resolveThread, setViewed, submitReview, updateComment,
+  addIssueComment, addThread, currentOids, deleteComment, deleteIssueComment, discardReview, ensurePendingReview, fetchBlobs,
+  fetchChecks, fetchConversation, fetchPatches, loadPr, refreshPr, replyThread, resolveThread, setViewed, submitReview,
+  updateComment, updateIssueComment,
 } from '../lib/github.ts';
+import { touchRecent, updateRecent } from '../lib/recent.ts';
 import { categorize, folderKey, isHidden } from '../lib/categorize.ts';
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
@@ -20,10 +23,11 @@ export interface Settings {
   folderDepth: number;
   showHidden: boolean;
   sidebarWidth: number;
+  highlight: boolean;
 }
 export const ALL = 1e9;
 const DEFAULT_SETTINGS: Settings = {
-  viewMode: 'unified', context: 10, fontSize: 12, grouping: 'tree', folderDepth: 2, showHidden: false, sidebarWidth: 300,
+  viewMode: 'unified', context: 10, fontSize: 12, grouping: 'tree', folderDepth: 2, showHidden: false, sidebarWidth: 300, highlight: true,
 };
 
 export type ComposerTarget =
@@ -31,6 +35,8 @@ export type ComposerTarget =
   | { kind: 'file'; quote?: string };
 
 export type Focus = { kind: 'category'; key: Category } | { kind: 'folder'; depth: number; key: string } | null;
+
+export type Tab = 'overview' | 'diff' | 'conversation';
 
 export interface Toast { id: number; text: string; error?: boolean }
 
@@ -67,8 +73,14 @@ interface State {
   expansions: Dict<Array<[number, number]>>;
   composers: Dict<ComposerTarget>;
   selAnchor: { path: string; anchor: Anchor } | null;
-  tab: 'overview' | 'diff';
+  tab: Tab;
   current: string | null;
+  /** file to scroll to once it is rendered (from the URL) */
+  pendingFile: string | null;
+  /** shown in the diff even if filters, focus or hide rules exclude it (an explicit jump) */
+  reveal: string | null;
+  checks: Checks | null;
+  conv: Conversation | null;
   filter: string;
   focus: Focus;
   toasts: Toast[];
@@ -100,6 +112,12 @@ const write = (key: string, v: unknown) => {
 };
 
 const prId = (r: PrRef) => `${r.owner}/${r.repo}#${r.number}`;
+const curKey = () => {
+  const r = useStore.getState().ref;
+  return r ? prId(r) : '';
+};
+/** Writes finishing after a switch to another PR must not touch the new PR's state. */
+const onPr = (key: string) => curKey() === key;
 const repoKey = (r: PrRef) => `ghr:rules:${r.owner}/${r.repo}`;
 const prKey = (r: PrRef) => `ghr:rules:${prId(r)}`;
 /** localStorage key for unsent text, scoped to the open PR. */
@@ -119,7 +137,7 @@ const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
 export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
-  expansions: dict(), composers: dict(), selAnchor: null, tab: 'diff', current: null, filter: '', focus: null,
+  expansions: dict(), composers: dict(), selAnchor: null, tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
   toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
@@ -166,8 +184,8 @@ export function matchesFilter(filter: string, f: PrFile) {
 /** Files shown in the diff stream, in order. */
 export function streamFiles(s: State): PrFile[] {
   if (!s.pr) return [];
-  return s.pr.files.filter(f =>
-    (s.settings.showHidden || !fileHidden(s, f)) && matchesFocus(s.focus, f) && matchesFilter(s.filter, f));
+  return s.pr.files.filter(f => f.path === s.reveal ||
+    ((s.settings.showHidden || !fileHidden(s, f)) && matchesFocus(s.focus, f) && matchesFilter(s.filter, f)));
 }
 
 export const isViewed = (v: ViewedState | undefined) => v === 'VIEWED';
@@ -232,11 +250,16 @@ interface ViewedBook {
   touched: Map<string, number>;
   queue: Map<string, { viewed: boolean; seq: number }>;
   timer: ReturnType<typeof setTimeout> | null;
+  /** the newest local state per written path (intent, or the rollback after a failure) */
+  local: Map<string, ViewedState>;
 }
 const newBook = (key: string): ViewedBook => ({
-  key, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(), timer: null,
+  key, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(),
+  timer: null, local: new Map(),
 });
 let book = newBook('');
+/** Books outlive navigation, so A -> B -> A keeps A's queued and in-flight writes ordered. */
+const books = new Map<string, ViewedBook>();
 
 /** Server viewed states, applied (and trusted as confirmed) only for paths not written since `since`. */
 function mergeServerViewed(cur: Dict<ViewedState>, server: Iterable<[string, ViewedState]>, since: number) {
@@ -259,16 +282,22 @@ export async function load(ref: PrRef) {
   const epoch = writeEpoch;
   const key = prId(ref);
   if (book.queue.size) void flushViewed(book);
-  const samePr = book.key === key;
-  if (!samePr) book = newBook(key);
+  const samePr = curKey() === key;
+  book = books.get(key) ?? newBook(key);
+  books.set(key, book);
+  touchRecent(ref);
+  const seeded = dict<ViewedState>();
+  for (const [p, v] of book.local) seeded[p] = v;
   set(s => ({
-    ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : dict(), threads: [], threadsByPath: dict(),
-    pendingReviewId: null,
+    ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
+    pendingReviewId: null, checks: null, ...(samePr ? {} : { conv: null, current: null, reveal: null }),
     blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null,
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
   const freshP = loadPr(ref);
   freshP.catch(() => {});
+  void loadChecks();
+  void loadConversation();
   const cached = await getPr(key);
   if (seq !== loadSeq) return;
   if (cached) applyPr(cached, seq, true, started, epoch);
@@ -345,6 +374,7 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
     };
   });
   if (typeof document !== "undefined") document.title = `${pr.title} · #${pr.ref.number}`;
+  recordRecent();
   if (!sameRev) void prefetchBlobs(seq);
 }
 
@@ -423,6 +453,8 @@ export async function refresh(manual = false) {
   }
   if (!s.pr || s.stale) return;
   refreshing = true;
+  void loadChecks();
+  void loadConversation();
   const started = performance.now();
   const epoch = writeEpoch;
   const gen = dataGen;
@@ -480,6 +512,7 @@ export function markViewed(paths: string[], viewed: boolean) {
   for (const p of paths) {
     if (isViewed(s.viewed[p]) === viewed) continue;
     next[p] = viewed ? 'VIEWED' : 'UNVIEWED';
+    b.local.set(p, next[p]);
     delete collapsed[p];
     b.touched.set(p, now);
     const seq = (b.seq.get(p) ?? 0) + 1;
@@ -488,6 +521,7 @@ export function markViewed(paths: string[], viewed: boolean) {
   }
   set({ viewed: next, collapsed });
   scheduleViewedFlush(b);
+  recordRecent();
 }
 
 function scheduleViewedFlush(b: ViewedBook) {
@@ -529,7 +563,11 @@ async function flushViewed(b: ViewedBook) {
     b.inflight.delete(q.path);
     b.touched.set(q.path, now);
     if (ok.get(q.path)) b.confirmed.set(q.path, q.viewed ? 'VIEWED' : 'UNVIEWED');
-    else if (b.seq.get(q.path) === q.seq) rollback.push([q.path, b.confirmed.get(q.path) ?? 'UNVIEWED']);
+    else if (b.seq.get(q.path) === q.seq) {
+      const v = b.confirmed.get(q.path) ?? 'UNVIEWED';
+      rollback.push([q.path, v]);
+      b.local.set(q.path, v);
+    }
   }
   if (rollback.length && book === b) {
     set(s => {
@@ -620,8 +658,9 @@ function swapTemp<T extends { id: string }>(list: T[], tempId: string, real: T):
 
 async function reviewId() {
   const s = get();
+  const key = curKey();
   const id = await ensurePendingReview({ id: s.pr!.id, headOid: s.pr!.headOid, pendingReviewId: s.pendingReviewId });
-  set({ pendingReviewId: id });
+  if (onPr(key)) set({ pendingReviewId: id });
   return id;
 }
 
@@ -634,12 +673,13 @@ export async function createThread(t: NewThread): Promise<boolean> {
     comments: [viewerComment(t.body)],
   };
   setThreads(ts => [...ts, temp]);
+  const key = curKey();
   try {
     const real = await writing(async () => addThread(await reviewId(), t));
-    setThreads(ts => swapTemp(ts, temp.id, real));
+    if (onPr(key)) setThreads(ts => swapTemp(ts, temp.id, real));
     return true;
   } catch (e) {
-    setThreads(ts => ts.filter(x => x.id !== temp.id));
+    if (onPr(key)) setThreads(ts => ts.filter(x => x.id !== temp.id));
     toast(`Comment failed: ${errText(e)}`, true);
     return false;
   }
@@ -647,8 +687,10 @@ export async function createThread(t: NewThread): Promise<boolean> {
 
 export async function reply(threadId: string, body: string): Promise<boolean> {
   const temp = viewerComment(body);
-  const patch = (fn: (cs: Comment[]) => Comment[]) =>
-    setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, comments: fn(t.comments) } : t)));
+  const key = curKey();
+  const patch = (fn: (cs: Comment[]) => Comment[]) => {
+    if (onPr(key)) setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, comments: fn(t.comments) } : t)));
+  };
   patch(cs => [...cs, temp]);
   try {
     const real = await writing(async () => replyThread(await reviewId(), threadId, body));
@@ -662,9 +704,10 @@ export async function reply(threadId: string, body: string): Promise<boolean> {
 }
 
 export async function editComment(id: string, body: string): Promise<boolean> {
+  const key = curKey();
   try {
     const real = await writing(() => updateComment(id, body));
-    setThreads(ts => ts.map(t => ({ ...t, comments: t.comments.map(c => (c.id === id ? { ...c, ...real } : c)) })));
+    if (onPr(key)) setThreads(ts => ts.map(t => ({ ...t, comments: t.comments.map(c => (c.id === id ? { ...c, ...real } : c)) })));
     return true;
   } catch (e) {
     toast(`Edit failed: ${errText(e)}`, true);
@@ -679,13 +722,14 @@ export async function removeComment(id: string) {
   const thread = ts0[tIdx];
   const cIdx = thread.comments.findIndex(c => c.id === id);
   const comment = thread.comments[cIdx];
+  const key = curKey();
   setThreads(ts => ts
     .map(t => (t.id === thread.id ? { ...t, comments: t.comments.filter(c => c.id !== id) } : t))
     .filter(t => t.comments.length));
   try {
     await writing(() => deleteComment(id));
   } catch (e) {
-    setThreads(ts => {
+    if (onPr(key)) setThreads(ts => {
       const at = ts.findIndex(t => t.id === thread.id);
       if (at < 0) {
         const out = [...ts];
@@ -704,7 +748,8 @@ export async function removeComment(id: string) {
 }
 
 export async function setResolved(threadId: string, resolved: boolean) {
-  const flip = (v: boolean) =>
+  const key = curKey();
+  const flip = (v: boolean) => onPr(key) &&
     setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, isResolved: v, viewerCanResolve: !v, viewerCanUnresolve: v } : t)));
   flip(resolved);
   try {
@@ -716,11 +761,16 @@ export async function setResolved(threadId: string, resolved: boolean) {
 }
 
 export async function submit(event: ReviewEvent, body: string): Promise<boolean> {
+  const key = curKey();
   try {
     await writing(async () => submitReview(await reviewId(), event, body));
-    set({ pendingReviewId: null });
     toast('Review submitted');
+    if (!onPr(key)) return true;
+    set({ pendingReviewId: null });
     void refresh();
+    // the submitted review belongs in the conversation; drop fetches that predate it
+    convEpoch++;
+    void loadConversation();
     return true;
   } catch (e) {
     toast(`Submit failed: ${errText(e)}`, true);
@@ -731,16 +781,150 @@ export async function submit(event: ReviewEvent, body: string): Promise<boolean>
 export async function discard(): Promise<boolean> {
   const id = get().pendingReviewId;
   if (!id) return true;
+  const key = curKey();
   try {
     await writing(() => discardReview(id));
+    toast('Draft review discarded');
+    if (!onPr(key)) return true;
     set({ pendingReviewId: null });
     setThreads(ts => ts
       .map(t => ({ ...t, comments: t.comments.filter(c => c.state !== 'PENDING') }))
       .filter(t => t.comments.length));
-    toast('Draft review discarded');
     return true;
   } catch (e) {
     toast(`Discard failed: ${errText(e)}`, true);
     return false;
+  }
+}
+
+// ---------- recent PRs ----------
+
+let recentTimer: ReturnType<typeof setTimeout> | null = null;
+function recordRecent() {
+  if (recentTimer) return;
+  recentTimer = setTimeout(() => {
+    recentTimer = null;
+    const { pr, viewed } = get();
+    if (!pr) return;
+    updateRecent(pr.ref, {
+      title: pr.title, author: pr.author, state: pr.state, isDraft: pr.isDraft, files: pr.changedFiles,
+      additions: pr.additions, deletions: pr.deletions, headOid: pr.headOid,
+      viewed: pr.files.filter(f => isViewed(viewed[f.path])).length,
+    });
+  }, 300);
+}
+
+// ---------- CI checks ----------
+
+let checksSeq = 0;
+export async function loadChecks() {
+  const ref = get().ref;
+  if (!ref) return;
+  const ls = loadSeq;
+  const seq = ++checksSeq;
+  try {
+    const checks = await fetchChecks(ref);
+    if (ls === loadSeq && seq === checksSeq) set({ checks });
+  } catch (e) {
+    console.warn('checks unavailable', e);
+  }
+}
+/** Checks for the loaded head commit only. */
+export const headChecks = (s: Pick<State, 'checks' | 'pr'>) => (s.checks && s.pr && s.checks.oid === s.pr.headOid ? s.checks : null);
+
+// ---------- conversation (top-level PR comments) ----------
+// Same rule as review threads: a fetch that started before a conversation write finished must not replace local state.
+
+let convWrites = 0;
+let convEpoch = 0;
+let convSeq = 0;
+let convAgain = false;
+export async function loadConversation() {
+  const ref = get().ref;
+  if (!ref) return;
+  const ls = loadSeq;
+  const seq = ++convSeq;
+  const epoch = convEpoch;
+  try {
+    const conv = await fetchConversation(ref);
+    if (ls !== loadSeq || seq !== convSeq) return;
+    if (convWrites > 0 || epoch !== convEpoch) {
+      convAgain = true;
+      return;
+    }
+    set(s => ({ conv: { ...conv, comments: [...conv.comments, ...(s.conv?.comments.filter(c => c.id.startsWith('tmp-')) ?? [])] } }));
+  } catch (e) {
+    console.warn('conversation unavailable', e);
+  }
+}
+async function convWriting<T>(fn: () => Promise<T>): Promise<T> {
+  convWrites++;
+  set(s => ({ busy: s.busy + 1 }));
+  try {
+    return await fn();
+  } finally {
+    convWrites--;
+    convEpoch++;
+    set(s => ({ busy: s.busy - 1 }));
+    if (convWrites === 0 && convAgain) {
+      convAgain = false;
+      void loadConversation();
+    }
+  }
+}
+function setIssueComments(fn: (c: IssueComment[]) => IssueComment[]) {
+  set(s => (s.conv ? { conv: { ...s.conv, comments: fn(s.conv.comments) } } : {}));
+}
+
+/** Posts a top-level PR comment right away (not part of the draft review). */
+export async function postComment(body: string): Promise<boolean> {
+  const pr = get().pr;
+  if (!pr || !get().conv) return false;
+  const temp: IssueComment = {
+    id: `tmp-${++tmpId}`, body, bodyHTML: '', createdAt: new Date().toISOString(), author: pr.viewer, url: '',
+    viewerCanUpdate: false, viewerCanDelete: false,
+  };
+  setIssueComments(cs => [...cs, temp]);
+  const key = curKey();
+  try {
+    const real = await convWriting(() => addIssueComment(pr.id, body));
+    if (onPr(key)) setIssueComments(cs => swapTemp(cs, temp.id, real));
+    return true;
+  } catch (e) {
+    if (onPr(key)) setIssueComments(cs => cs.filter(c => c.id !== temp.id));
+    toast(`Comment failed: ${errText(e)}`, true);
+    return false;
+  }
+}
+
+export async function editIssueComment(id: string, body: string): Promise<boolean> {
+  const key = curKey();
+  try {
+    const real = await convWriting(() => updateIssueComment(id, body));
+    if (onPr(key)) setIssueComments(cs => cs.map(c => (c.id === id ? real : c)));
+    return true;
+  } catch (e) {
+    toast(`Edit failed: ${errText(e)}`, true);
+    return false;
+  }
+}
+
+export async function removeIssueComment(id: string) {
+  const cs0 = get().conv?.comments ?? [];
+  const at = cs0.findIndex(c => c.id === id);
+  if (at < 0) return;
+  const comment = cs0[at];
+  const key = curKey();
+  setIssueComments(cs => cs.filter(c => c.id !== id));
+  try {
+    await convWriting(() => deleteIssueComment(id));
+  } catch (e) {
+    if (onPr(key)) setIssueComments(cs => {
+      if (cs.some(c => c.id === id)) return cs;
+      const out = [...cs];
+      out.splice(Math.min(at, out.length), 0, comment);
+      return out;
+    });
+    toast(`Delete failed: ${errText(e)}`, true);
   }
 }

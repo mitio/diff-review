@@ -1,4 +1,4 @@
-import type { BlobResult, BlobSpec, Comment, NewThread, PrData, PrFile, PrRef, RefreshResult, ReviewEvent, Thread, ViewedState } from '../types';
+import type { BlobResult, BlobSpec, Check, CheckBucket, Checks, Comment, Conversation, IssueComment, NewThread, PrData, PrFile, PrRef, RecentStatus, RefreshResult, ReviewEvent, ReviewSummary, Thread, ViewedState } from '../types';
 import { gql, rest, restText } from './api';
 import { splitUnifiedDiff } from './diff';
 import * as cache from './cache';
@@ -179,4 +179,91 @@ export async function discardReview(reviewId: string): Promise<void> { await gql
 /** GitHub's whole-PR diff, split per file. Fills in patches the REST file list omits on large PRs. */
 export async function fetchPatches(ref: PrRef): Promise<Map<string,string>> {
   return splitUnifiedDiff(await restText(`repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`));
+}
+
+const CONTEXTS = `contexts(first:100, after:$after) { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } nodes { __typename ... on CheckRun { name status conclusion detailsUrl startedAt completedAt isRequired(pullRequestNumber:$number) checkSuite { app { name } workflowRun { workflow { name } } } } ... on StatusContext { context state targetUrl description createdAt isRequired(pullRequestNumber:$number) } } ${PAGE} }`;
+const RUN_PENDING = new Set(['IN_PROGRESS','PENDING','QUEUED','WAITING','REQUESTED']);
+/** CheckRun state (status or conclusion) or StatusContext state -> bucket. */
+export function bucketOf(state: string): CheckBucket {
+  if (state === 'SUCCESS' || state === 'NEUTRAL' || state === 'COMPLETED') return 'ok';
+  if (state === 'SKIPPED') return 'skipped';
+  if (RUN_PENDING.has(state) || state === 'EXPECTED') return 'pending';
+  return 'fail';
+}
+function check(n: Raw): Check {
+  if (n.__typename === 'StatusContext') {
+    const bucket = bucketOf(n.state);
+    return {name:n.context,source:null,bucket,detail:[n.state,n.description].filter(Boolean).join(' · '),url:n.targetUrl ?? null,startedAt:n.createdAt ?? null,completedAt:null,required:!!n.isRequired};
+  }
+  const bucket: CheckBucket = n.status !== 'COMPLETED' ? 'pending' : bucketOf(n.conclusion ?? 'COMPLETED');
+  return {name:n.name,source:n.checkSuite?.workflowRun?.workflow?.name ?? n.checkSuite?.app?.name ?? null,bucket,detail:(n.conclusion ?? n.status ?? '').toLowerCase(),url:n.detailsUrl ?? null,startedAt:n.startedAt ?? null,completedAt:n.completedAt ?? null,required:!!n.isRequired};
+}
+/** CI of the PR's head commit. `oid` is the commit the rollup belongs to; callers drop it if it is not the loaded head. */
+export async function fetchChecks(ref: PrRef): Promise<Checks> {
+  const checks: Check[] = [];
+  let after: string | null = null, oid = '', state: string | null = null, total = 0;
+  const counts: Record<CheckBucket,number> = {ok:0,fail:0,pending:0,skipped:0};
+  for (let page = 0; page < 5; page++) {
+    const res: {data: Raw} = await gql<Raw>(`query($owner:String!,$repo:String!,$number:Int!,$after:String) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { commits(last:1) { nodes { commit { oid statusCheckRollup { state ${CONTEXTS} } } } } } } }`,{...vars(ref),after});
+    const commit: Raw | undefined = res.data.repository?.pullRequest?.commits.nodes[0]?.commit;
+    if (!commit) break;
+    if (page > 0 && commit.oid !== oid) throw new Error('Head moved while loading checks');
+    oid = commit.oid;
+    const rollup: Raw | null = commit.statusCheckRollup;
+    if (!rollup) break;
+    state = rollup.state; total = rollup.contexts.totalCount;
+    if (page === 0) for (const c of [...(rollup.contexts.checkRunCountsByState ?? []),...(rollup.contexts.statusContextCountsByState ?? [])]) counts[bucketOf(c.state)] += c.count;
+    checks.push(...rollup.contexts.nodes.filter((n: Raw) => n.__typename === 'CheckRun' || n.__typename === 'StatusContext').map(check));
+    if (!rollup.contexts.pageInfo.hasNextPage) break;
+    after = rollup.contexts.pageInfo.endCursor;
+  }
+  return {oid,state,checks,total,counts};
+}
+
+const ISSUE_COMMENT = 'id body bodyHTML createdAt author { login avatarUrl } url viewerCanUpdate viewerCanDelete';
+const REVIEW = 'id state body bodyHTML submittedAt author { login avatarUrl } url';
+const issueComment = (c: Raw): IssueComment => ({...c,author:c.author ?? null} as IssueComment);
+const review = (r: Raw): ReviewSummary => ({...r,author:r.author ?? null} as ReviewSummary);
+/** Newest first: up to 10 pages each of comments and reviews; `truncated` when older ones exist. */
+export async function fetchConversation(ref: PrRef): Promise<Conversation> {
+  const q = (comments: boolean, reviews: boolean) => `query($owner:String!,$repo:String!,$number:Int!,$cb:String,$rb:String) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { body bodyHTML createdAt ${comments ? `comments(last:100,before:$cb) { nodes { ${ISSUE_COMMENT} } pageInfo { hasPreviousPage startCursor } }` : ''} ${reviews ? `reviews(last:100,before:$rb,states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]) { nodes { ${REVIEW} } pageInfo { hasPreviousPage startCursor } }` : ''} } } }`;
+  const {data} = await gql<Raw>(q(true,true),vars(ref));
+  const pr = data.repository?.pullRequest;
+  if (!pr) throw new Error('Pull request not found');
+  let comments: Raw[] = pr.comments.nodes, reviews: Raw[] = pr.reviews.nodes;
+  let ci = pr.comments.pageInfo, ri = pr.reviews.pageInfo;
+  for (let page = 1; page < 10 && (ci.hasPreviousPage || ri.hasPreviousPage); page++) {
+    const {data:next} = await gql<Raw>(q(ci.hasPreviousPage,ri.hasPreviousPage),{...vars(ref),cb:ci.hasPreviousPage ? ci.startCursor : null,rb:ri.hasPreviousPage ? ri.startCursor : null});
+    const p = next.repository.pullRequest;
+    if (p.comments) { comments = [...p.comments.nodes,...comments]; ci = p.comments.pageInfo; }
+    if (p.reviews) { reviews = [...p.reviews.nodes,...reviews]; ri = p.reviews.pageInfo; }
+  }
+  return {body:pr.body,bodyHTML:pr.bodyHTML,createdAt:pr.createdAt,comments:comments.map(issueComment),reviews:reviews.map(review),truncated:!!(ci.hasPreviousPage || ri.hasPreviousPage)};
+}
+export async function addIssueComment(subjectId: string, body: string): Promise<IssueComment> {
+  const {data} = await gql<Raw>(`mutation($input:AddCommentInput!) { addComment(input:$input) { commentEdge { node { ${ISSUE_COMMENT} } } } }`,{input:{subjectId,body}});
+  return issueComment(data.addComment.commentEdge.node);
+}
+export async function updateIssueComment(id: string, body: string): Promise<IssueComment> {
+  const {data} = await gql<Raw>(`mutation($input:UpdateIssueCommentInput!) { updateIssueComment(input:$input) { issueComment { ${ISSUE_COMMENT} } } }`,{input:{id,body}});
+  return issueComment(data.updateIssueComment.issueComment);
+}
+export async function deleteIssueComment(id: string): Promise<void> { await gql('mutation($id:ID!) { deleteIssueComment(input:{id:$id}) { clientMutationId } }',{id}); }
+
+/** Live status of many PRs in one query; a PR that errors (deleted, no access) is left out. */
+export async function fetchRecentStatus(refs: PrRef[]): Promise<Map<string,RecentStatus>> {
+  const out = new Map<string,RecentStatus>();
+  if (!refs.length) return out;
+  const variables: Raw = {};
+  const fields = refs.map((r,i) => {
+    variables[`o${i}`] = r.owner; variables[`r${i}`] = r.repo; variables[`n${i}`] = r.number;
+    return `p${i}:repository(owner:$o${i},name:$r${i}) { pullRequest(number:$n${i}) { title state isDraft headRefOid reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } } }`;
+  }).join(' ');
+  const decl = refs.map((_,i) => `$o${i}:String!,$r${i}:String!,$n${i}:Int!`).join(',');
+  const {data} = await gql<Raw>(`query(${decl}) { ${fields} }`,variables,{allowPartial:true});
+  refs.forEach((r,i) => {
+    const pr = data?.[`p${i}`]?.pullRequest;
+    if (pr) out.set(`${r.owner}/${r.repo}#${r.number}`,{title:pr.title,state:pr.state,isDraft:pr.isDraft,headOid:pr.headRefOid,reviewDecision:pr.reviewDecision ?? null,ci:pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null});
+  });
+  return out;
 }

@@ -5,6 +5,7 @@ const gh = vi.hoisted(() => ({
   loadPr: vi.fn(), currentOids: vi.fn(), setViewed: vi.fn(), refreshPr: vi.fn(), fetchBlobs: vi.fn(),
   fetchPatches: vi.fn(), ensurePendingReview: vi.fn(), addThread: vi.fn(), replyThread: vi.fn(),
   updateComment: vi.fn(), deleteComment: vi.fn(), resolveThread: vi.fn(), submitReview: vi.fn(), discardReview: vi.fn(),
+  fetchChecks: vi.fn(), fetchConversation: vi.fn(), addIssueComment: vi.fn(), updateIssueComment: vi.fn(), deleteIssueComment: vi.fn(),
 }));
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
@@ -40,6 +41,8 @@ beforeEach(async () => {
   gh.currentOids.mockResolvedValue({ baseOid: 'b', headOid: 'h' });
   gh.fetchBlobs.mockResolvedValue(new Map());
   gh.ensurePendingReview.mockResolvedValue('R');
+  gh.fetchChecks.mockReturnValue(new Promise(() => {}));
+  gh.fetchConversation.mockReturnValue(new Promise(() => {}));
 });
 afterEach(() => vi.useRealTimers());
 
@@ -230,4 +233,58 @@ test('a new revision on reload overrides a viewed mark that completed during the
   fresh.resolve(pr({ headOid: 'h2', files: pr().files.map(f => (f.path === 'a.ts' ? { ...f, viewed: 'DISMISSED' as const } : f)) }));
   await reloading;
   expect(useStore.getState().viewed['a.ts']).toBe('DISMISSED');
+});
+
+const ref2 = { owner: 'o', repo: 'r', number: 2 };
+const conv = (body: string) => ({ body, bodyHTML: '', createdAt: '', comments: [], reviews: [], truncated: false });
+
+test('a pending review created for one PR is not installed on the next', async () => {
+  await loaded();
+  const created = deferred<string>();
+  gh.ensurePendingReview.mockReturnValueOnce(created.promise);
+  gh.addThread.mockResolvedValue(thread('real'));
+  const done = createThread({ path: 'a.ts', body: 'hi', subjectType: 'LINE', line: 1, side: 'RIGHT' });
+  gh.loadPr.mockResolvedValue(pr({ ref: ref2, id: 'PR2' }));
+  await load(ref2);
+  created.resolve('R-of-PR1');
+  await done;
+  const s = useStore.getState();
+  expect(s.ref).toEqual(ref2);
+  expect(s.pendingReviewId).toBeNull();
+  expect(s.threads).toEqual([]);
+});
+
+test('A -> B -> A keeps the viewed write that is still in flight', async () => {
+  await loaded();
+  const write = deferred<Array<{ path: string; ok: boolean }>>();
+  gh.setViewed.mockReturnValueOnce(write.promise);
+  markViewed(['a.ts'], true);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(gh.setViewed).toHaveBeenCalledTimes(1);
+  gh.loadPr.mockResolvedValue(pr({ ref: ref2, id: 'PR2' }));
+  await load(ref2);
+  gh.loadPr.mockResolvedValue(pr());
+  await load(ref);
+  expect(useStore.getState().viewed['a.ts']).toBe('VIEWED');
+  // a second toggle still waits for the first request
+  markViewed(['a.ts'], false);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(gh.setViewed).toHaveBeenCalledTimes(1);
+  gh.setViewed.mockResolvedValue([{ path: 'a.ts', ok: true }]);
+  write.resolve([{ path: 'a.ts', ok: true }]);
+  await vi.advanceTimersByTimeAsync(200);
+  expect(gh.setViewed).toHaveBeenCalledTimes(2);
+  expect(gh.setViewed.mock.calls[1][1]).toEqual([{ path: 'a.ts', viewed: false }]);
+});
+
+test("a conversation fetched for the previous PR is dropped", async () => {
+  const slow = deferred<ReturnType<typeof conv>>();
+  gh.fetchConversation.mockReturnValueOnce(slow.promise).mockResolvedValueOnce(conv('B'));
+  await loaded();
+  gh.loadPr.mockResolvedValue(pr({ ref: ref2, id: 'PR2' }));
+  await load(ref2);
+  await flush();
+  slow.resolve(conv('A'));
+  await flush();
+  expect(useStore.getState().conv?.body).toBe('B');
 });

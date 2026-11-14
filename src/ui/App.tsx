@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { PrRef, ReviewEvent } from '../types.ts';
-import { parsePrUrl } from '../lib/github.ts';
+import type { Check, CheckBucket, PrRef, RecentStatus, ReviewEvent } from '../types.ts';
+import { fetchRecentStatus, parsePrUrl } from '../lib/github.ts';
+import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent.ts';
 import {
-  ALL, discard, dismissToast, draftKey, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings,
-  useStore,
+  ALL, discard, dismissToast, toast, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
+  refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
+import { Conversation } from './Conversation.tsx';
+import { navigate, onLinkClick, sameRef, useRoute } from './router.ts';
 import { Sidebar } from './Sidebar.tsx';
 import { Overview } from './Overview.tsx';
 import { FileBlock } from './FileDiff.tsx';
 import { ThreadView } from './Thread.tsx';
-import { UserLink } from './bits.tsx';
+import { UserLink, relTime } from './bits.tsx';
 import { setScrollRoot } from './Lazy.tsx';
-import { onMainScroll, stepFile, toggleViewedCurrent } from './nav.ts';
+import { onMainScroll, scrollToFile, stepFile, toggleViewedCurrent } from './nav.ts';
 
 const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
 
@@ -34,7 +37,15 @@ export function App({ prRef: ref }: { prRef: PrRef }) {
       void refresh();
     };
     window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
+    // CI moves on its own: poll while something is still running
+    const poll = setInterval(() => {
+      const c = headChecks(useStore.getState());
+      if (document.visibilityState === 'visible' && c && c.counts.pending > 0) void loadChecks();
+    }, 30_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(poll);
+    };
   }, []);
 
   if (error) {
@@ -42,7 +53,8 @@ export function App({ prRef: ref }: { prRef: PrRef }) {
       <div className="center">
         <p>Failed to load {ref.owner}/{ref.repo}#{ref.number}</p>
         <pre style={{ whiteSpace: 'pre-wrap' }}>{error}</pre>
-        <button onClick={() => void load(ref)}>Retry</button>
+        <button onClick={() => void load(ref)}>Retry</button>{' '}
+        <a className="btn" href="/" onClick={onLinkClick}>Home</a>
       </div>
     );
   }
@@ -64,7 +76,7 @@ export function App({ prRef: ref }: { prRef: PrRef }) {
   );
 }
 
-function Main({ tab }: { tab: 'overview' | 'diff' }) {
+function Main({ tab }: { tab: Tab }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setScrollRoot(ref.current);
@@ -76,6 +88,7 @@ function Main({ tab }: { tab: 'overview' | 'diff' }) {
         <DiffStream />
       </main>
       {tab === 'overview' && <div className="overlay"><Overview /></div>}
+      {tab === 'conversation' && <div className="overlay"><Conversation /></div>}
     </div>
   );
 }
@@ -97,13 +110,29 @@ function DiffStream() {
   const repoRules = useStore(s => s.repoRules);
   const prRules = useStore(s => s.prRules);
   const threads = useStore(s => s.threads);
-  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules]);
+  const reveal = useStore(s => s.reveal);
+  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules, reveal]);
   const orphans = useMemo(() => {
     const paths = new Set(pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])));
     return threads.filter(t => !paths.has(t.path));
   }, [pr, threads]);
   const hiddenN = pr.files.filter(f => fileHidden({ repoRules, prRules }, f)).length;
+  const pendingFile = useStore(s => s.pendingFile);
   useEffect(() => { onMainScroll(); }, [files]);
+  useEffect(() => {
+    // the store may still hold the previous PR for a render after back/forward
+    if (!pendingFile || !sameRef(pr.ref, useRoute.getState().ref)) return;
+    if (files.some(f => f.path === pendingFile)) {
+      requestAnimationFrame(() => {
+        if (useStore.getState().pendingFile === pendingFile && scrollToFile(pendingFile)) useStore.setState({ pendingFile: null });
+      });
+    } else if (pr.files.some(f => f.path === pendingFile)) {
+      useStore.setState({ reveal: pendingFile });
+    } else if (!useStore.getState().revalidating) {
+      toast(`${pendingFile} is not part of this PR`);
+      useStore.setState({ pendingFile: null });
+    }
+  }, [files, pendingFile, pr]);
   return (
     <div className="files">
       {files.map(f => <FileBlock key={f.path} file={f} />)}
@@ -137,8 +166,14 @@ function TopBar() {
   const revalidating = useStore(s => s.revalidating);
   const [reviewOpen, setReviewOpen] = useState(false);
   const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
+  const conv = useStore(s => s.conv);
+  const nConv = conv ? conv.comments.length + conv.reviews.filter(r => r.body.trim()).length : null;
+  const tabBtn = (t: Tab, label: string, key: string) => (
+    <button className={tab === t ? 'on' : ''} onClick={() => useStore.setState({ tab: t })} title={`${label} (${key})`}>{label}</button>
+  );
   return (
     <div className="topbar">
+      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent PRs">⌂</a>
       <a className="title" href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
       <a className="muted" href={pr.url} target="_blank" rel="noreferrer">#{pr.ref.number}</a>
       <span className={`chip ${pr.isDraft ? 'draft' : `state-${pr.state}`}`}>{pr.isDraft ? 'Draft' : pr.state.toLowerCase()}</span>
@@ -147,12 +182,14 @@ function TopBar() {
       <span className="chip">{pr.files.length} files</span>
       <span className="chip"><span className="add">+{pr.additions}</span> <span className="del">−{pr.deletions}</span></span>
       <span className="chip" title="Viewed files">✓ {nViewed}/{pr.files.length}</span>
+      <ChecksChip />
       <span className="spacer" />
       {busy > 0 && <span className="faint">saving…</span>}
       {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
       <span className="seg">
-        <button className={tab === 'overview' ? 'on' : ''} onClick={() => useStore.setState({ tab: 'overview' })} title="Overview (o)">Overview</button>
-        <button className={tab === 'diff' ? 'on' : ''} onClick={() => useStore.setState({ tab: 'diff' })} title="Diff (d)">Diff</button>
+        {tabBtn('overview', 'Overview', 'o')}
+        {tabBtn('diff', 'Diff', 'd')}
+        {tabBtn('conversation', nConv ? `Conversation · ${nConv}` : 'Conversation', 't')}
       </span>
       <span className="seg" title="Toggle with s">
         <button className={settings.viewMode === 'unified' ? 'on' : ''} onClick={() => updateSettings({ viewMode: 'unified' })}>Unified</button>
@@ -180,7 +217,8 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
   const pending = useStore(s => pendingCount(s));
   const hasDraft = useStore(s => !!s.pendingReviewId);
   const own = useStore(s => s.pr!.author?.login === s.pr!.viewer.login);
-  const [body, setBody] = useState(() => { try { return localStorage.getItem(draftKey('review-body')) ?? ''; } catch { return ''; } });
+  const [key] = useState(() => draftKey('review-body'));
+  const [body, setBody] = useState(() => { try { return localStorage.getItem(key) ?? ''; } catch { return ''; } });
   const [event, setEvent] = useState<ReviewEvent>('COMMENT');
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -191,7 +229,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
   }, [onClose]);
   const save = (v: string) => {
     setBody(v);
-    try { if (v) localStorage.setItem(draftKey('review-body'), v); else localStorage.removeItem(draftKey('review-body')); } catch { /* */ }
+    try { if (v) localStorage.setItem(key, v); else localStorage.removeItem(key); } catch { /* */ }
   };
   const go = async () => {
     setSending(true);
@@ -275,7 +313,8 @@ const KEYS: Array<[string, string]> = [
   ['s', 'toggle unified / split'],
   ['[ / ]', 'less / more context'],
   ['- / =', 'smaller / larger font'],
-  ['o / d', 'overview / diff'],
+  ['o / d / t', 'overview / diff / conversation'],
+  ['h', 'syntax highlighting on / off'],
   ['/', 'filter files'],
   ['r', 'refresh comments + viewed state'],
   ['c', 'comment on current file'],
@@ -317,6 +356,8 @@ function useKeys() {
         case '=': case '+': updateSettings({ fontSize: Math.min(18, st.fontSize + 1) }); break;
         case 'o': useStore.setState({ tab: 'overview' }); break;
         case 'd': useStore.setState({ tab: 'diff' }); break;
+        case 't': useStore.setState({ tab: 'conversation' }); break;
+        case 'h': updateSettings({ highlight: !st.highlight }); break;
         case 'r': void refresh(true); break;
         case 'c': if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
         case '/': e.preventDefault(); document.getElementById('file-filter')?.focus(); break;
@@ -331,9 +372,73 @@ function useKeys() {
   }, []);
 }
 
+const BUCKET_ORDER: CheckBucket[] = ['fail', 'pending', 'ok', 'skipped'];
+const BUCKET_ICON: Record<CheckBucket, string> = { fail: '✗', pending: '●', ok: '✓', skipped: '–' };
+
+function ChecksChip() {
+  const checks = useStore(s => headChecks(s));
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+  if (!checks || !checks.total) return null;
+  const count = (b: CheckBucket) => checks.counts[b];
+  const worst = BUCKET_ORDER.find(b => count(b) > 0) ?? 'ok';
+  const sorted = [...checks.checks].sort((a, b) => BUCKET_ORDER.indexOf(a.bucket) - BUCKET_ORDER.indexOf(b.bucket) || a.name.localeCompare(b.name));
+  const summary = (['fail', 'pending', 'ok'] as CheckBucket[]).filter(b => count(b)).map(b => `${BUCKET_ICON[b]} ${count(b)}`).join('  ');
+  return (
+    <span ref={ref} style={{ position: 'relative' }}>
+      <button className={`chip ci-${worst}`} onClick={() => setOpen(!open)} title="CI checks on the head commit">CI {summary}</button>
+      {open && (
+        <div className="popover checks" style={{ left: 0, top: 26 }}>
+          {checks.total > checks.checks.length && <div className="faint">Listing {checks.checks.length} of {checks.total} checks; the counts cover all.</div>}
+          <table><tbody>{sorted.map((c, i) => <CheckRow key={i} c={c} />)}</tbody></table>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function duration(c: Check) {
+  if (!c.startedAt || !c.completedAt) return '';
+  const s = Math.round((Date.parse(c.completedAt) - Date.parse(c.startedAt)) / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function CheckRow({ c }: { c: Check }) {
+  return (
+    <tr>
+      <td className={`ci-${c.bucket}`} title={c.detail}>{BUCKET_ICON[c.bucket]}</td>
+      <td>
+        {c.url ? <a href={c.url} target="_blank" rel="noreferrer">{c.name}</a> : c.name}
+        {c.source && <span className="faint"> · {c.source}</span>}
+        {c.required && <span className="chip">required</span>}
+      </td>
+      <td className="faint" title={c.detail}>{c.bucket === 'pending' ? c.detail : duration(c)}</td>
+    </tr>
+  );
+}
+
+const prPath = (r: PrRef) => `/${r.owner}/${r.repo}/pull/${r.number}`;
+
 export function Home() {
   const [v, setV] = useState('');
   const [err, setErr] = useState('');
+  const [recent, setRecent] = useState<RecentPr[]>(() => listRecent());
+  const [live, setLive] = useState<Map<string, RecentStatus> | null>(null);
+  useEffect(() => {
+    document.title = 'gh-review';
+    const list = listRecent();
+    setRecent(list);
+    if (!list.length) return;
+    let cancelled = false;
+    fetchRecentStatus(list).then(m => { if (!cancelled) setLive(m); }).catch(e => console.warn('recent status unavailable', e));
+    return () => { cancelled = true; };
+  }, []);
   const origin = location.origin;
   const bookmarklet = `javascript:(()=>{const m=location.href.match(/github\\.com\\/([^/]+\\/[^/]+\\/pull\\/\\d+)/);if(m)location.href='${origin}/'+m[1];})()`;
   return (
@@ -343,12 +448,21 @@ export function Home() {
         e.preventDefault();
         const r = parsePrUrl(v.trim());
         if (!r) { setErr('Not a PR URL'); return; }
-        location.href = `/${r.owner}/${r.repo}/pull/${r.number}`;
+        navigate(prPath(r));
       }}>
         <input autoFocus placeholder="https://github.com/owner/repo/pull/123" value={v} onChange={e => { setV(e.target.value); setErr(''); }} data-1p-ignore />
         <button className="primary" type="submit">Open</button>
       </form>
       {err && <div className="del">{err}</div>}
+      {recent.length > 0 && (
+        <table className="recent">
+          <tbody>
+            {recent.map(r => (
+              <RecentRow key={recentId(r)} r={r} live={live?.get(recentId(r))} onRemove={() => { removeRecent(r); setRecent(listRecent()); }} />
+            ))}
+          </tbody>
+        </table>
+      )}
       <div className="muted">
         Or replace <code style={{ display: 'inline' }}>https://github.com</code> with <code style={{ display: 'inline' }}>{origin}</code> in any PR URL.
         Bookmarklet (drag to your bookmarks bar):{' '}
@@ -356,5 +470,41 @@ export function Home() {
         <a ref={el => { el?.setAttribute('href', bookmarklet); }}>Review in gh-review</a>
       </div>
     </div>
+  );
+}
+
+const DECISION: Record<string, [string, string]> = {
+  APPROVED: ['approved', 'review-APPROVED'], CHANGES_REQUESTED: ['changes requested', 'review-CHANGES_REQUESTED'], REVIEW_REQUIRED: ['review required', ''],
+};
+const CI_BUCKET: Record<string, CheckBucket> = { SUCCESS: 'ok', FAILURE: 'fail', ERROR: 'fail', PENDING: 'pending', EXPECTED: 'pending' };
+
+function RecentRow({ r, live, onRemove }: { r: RecentPr; live: RecentStatus | undefined; onRemove: () => void }) {
+  const state = live?.state ?? r.state;
+  const draft = live?.isDraft ?? r.isDraft;
+  const moved = !!live && !!r.headOid && live.headOid !== r.headOid;
+  const decision = live?.reviewDecision ? DECISION[live.reviewDecision] : undefined;
+  const ci = live?.ci ? CI_BUCKET[live.ci] : undefined;
+  return (
+    <tr>
+      <td className="rtitle">
+        <a href={prPath(r)} onClick={onLinkClick} title={live?.title ?? r.title}>{live?.title ?? r.title}</a>
+        <div className="faint">
+          {r.owner}/{r.repo}#{r.number}
+          {r.files > 0 && <> · {r.viewed}/{r.files} viewed · <span className="add">+{r.additions}</span> <span className="del">−{r.deletions}</span></>}
+        </div>
+      </td>
+      <td><UserLink user={r.author} /></td>
+      <td className="chips">
+        <span className={`chip ${draft ? 'draft' : `state-${state}`}`}>{draft ? 'Draft' : state.toLowerCase()}</span>
+        {ci && <span className={`chip ci-${ci}`} title={`CI: ${live!.ci!.toLowerCase()}`}>CI {BUCKET_ICON[ci]}</span>}
+        {decision && <span className={`chip ${decision[1]}`}>{decision[0]}</span>}
+        {moved && <span className="chip warn" title="New commits since you last opened it">new commits</span>}
+      </td>
+      <td className="faint" title={new Date(r.openedAt).toISOString()}>{relTime(new Date(r.openedAt).toISOString())}</td>
+      <td className="acts">
+        <a className="btn small" href={`https://github.com/${r.owner}/${r.repo}/pull/${r.number}`} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>
+        <button className="small" title="Remove from this list" onClick={onRemove}>×</button>
+      </td>
+    </tr>
   );
 }
