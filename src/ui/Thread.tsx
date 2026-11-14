@@ -33,6 +33,8 @@ export function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, o
 }) {
   const [key] = useState(() => draftKey(draftId));
   const [text, setText] = useState(() => loadDraft(key) ?? initial ?? '');
+  const latest = useRef(text);
+  latest.current = text;
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -50,7 +52,7 @@ export function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, o
     const ok = await onSubmit(body);
     setSending(false);
     if (!ok) saveDraft(key, text);
-    else setText('');
+    else if (latest.current === text) setText('');
   };
   return (
     <div className="composer" onClick={e => e.stopPropagation()}>

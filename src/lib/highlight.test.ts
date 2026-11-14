@@ -38,6 +38,17 @@ describe('highlight', () => {
     expect(t.b[1]).toBeNull();
   });
 
+  it('highlights the old side of addition-only changes on its own', () => {
+    const rows = [
+      { kind: 'add' as const, text: '/*' },
+      { kind: 'ctx' as const, text: 'doThing();' },
+      { kind: 'add' as const, text: '*/' },
+    ];
+    const t = highlightRows(rows, 'javascript')!;
+    expect(t.b[1]).toEqual([[10, 'hljs-comment']]);
+    expect(t.a[1]).not.toEqual([[10, 'hljs-comment']]);
+  });
+
   it('gives context rows tokens from each side', () => {
     const rows = [
       { kind: 'del' as const, text: '/*' },

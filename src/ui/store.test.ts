@@ -10,7 +10,7 @@ const gh = vi.hoisted(() => ({
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
 
-import { createThread, load, markViewed, refresh, removeComment, useStore } from './store.ts';
+import { createThread, load, markViewed, postComment, refresh, removeComment, useStore } from './store.ts';
 
 const ref = { owner: 'o', repo: 'r', number: 1 };
 const thread = (id: string, path = 'a.ts', commentId = `${id}-c`): Thread => ({
@@ -287,4 +287,23 @@ test("a conversation fetched for the previous PR is dropped", async () => {
   slow.resolve(conv('A'));
   await flush();
   expect(useStore.getState().conv?.body).toBe('B');
+});
+
+test('a conversation fetch that a finished write made stale is retried', async () => {
+  const bFirst = deferred<ReturnType<typeof conv>>();
+  gh.fetchConversation.mockResolvedValueOnce(conv('A')).mockReturnValueOnce(bFirst.promise).mockResolvedValueOnce(conv('B2'));
+  await loaded();
+  await flush();
+  expect(useStore.getState().conv?.body).toBe('A');
+  const write = deferred<unknown>();
+  gh.addIssueComment.mockReturnValueOnce(write.promise);
+  const posting = postComment('hi');
+  gh.loadPr.mockResolvedValue(pr({ ref: ref2, id: 'PR2' }));
+  await load(ref2);
+  write.resolve({ id: 'IC', body: 'hi', bodyHTML: '', createdAt: '', author: null, url: '', viewerCanUpdate: true, viewerCanDelete: true });
+  await posting;
+  bFirst.resolve(conv('B1'));
+  await flush();
+  await flush();
+  expect(useStore.getState().conv?.body).toBe('B2');
 });

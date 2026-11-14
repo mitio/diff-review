@@ -45,6 +45,15 @@ export const sameRef = (a: PrRef | null, b: PrRef | null) =>
 let lastMajor = '';
 let fileIntent = false;
 let replaceTimer: ReturnType<typeof setTimeout> | null = null;
+/** the newest URL for the current entry, not yet written (replaceState is throttled) */
+let pendingReplace: string | null = null;
+
+function flushReplace() {
+  if (replaceTimer) clearTimeout(replaceTimer);
+  replaceTimer = null;
+  if (pendingReplace && pendingReplace !== location.pathname + location.search) history.replaceState(null, '', pendingReplace);
+  pendingReplace = null;
+}
 
 function apply(r: Route) {
   lastMajor = major(r);
@@ -52,9 +61,11 @@ function apply(r: Route) {
   const prChanged = !sameRef(useRoute.getState().ref, r.ref);
   if (prChanged) useRoute.setState({ ref: r.ref });
   if (!r.ref) return;
-  const patch: Partial<ReturnType<typeof useStore.getState>> = { tab: r.tab, focus: r.focus, filter: r.q };
-  if (r.file && (prChanged || r.file !== s.current)) patch.pendingFile = r.file;
-  useStore.setState(patch);
+  // a restored entry replaces any earlier jump target and reveal
+  useStore.setState({
+    tab: r.tab, focus: r.focus, filter: r.q, reveal: null,
+    pendingFile: r.file && (prChanged || r.file !== s.current) ? r.file : null,
+  });
 }
 
 function currentRoute(): Route | null {
@@ -68,22 +79,20 @@ function sync() {
   const r = currentRoute();
   if (!r) return;
   const url = routeUrl(r);
-  if (url === location.pathname + location.search) return;
   const m = major(r);
   if (m !== lastMajor || fileIntent) {
-    if (replaceTimer) clearTimeout(replaceTimer);
-    replaceTimer = null;
+    if (url === (pendingReplace ?? location.pathname + location.search)) return;
+    // the entry being left keeps its latest state
+    flushReplace();
     fileIntent = false;
     lastMajor = m;
     history.pushState(null, '', url);
     return;
   }
+  if (url === (pendingReplace ?? location.pathname + location.search)) return;
   // filter typing and the scroll spy change the URL constantly; keep it current without flooding history
-  replaceTimer ??= setTimeout(() => {
-    replaceTimer = null;
-    const now = currentRoute();
-    if (now && major(now) === lastMajor) history.replaceState(null, '', routeUrl(now));
-  }, 250);
+  pendingReplace = url;
+  replaceTimer ??= setTimeout(flushReplace, 250);
 }
 
 /** The next file change gets its own history entry (a click on a file, not scrolling). */
@@ -92,6 +101,7 @@ export function markFileIntent() {
 }
 
 export function navigate(url: string) {
+  flushReplace();
   history.pushState(null, '', url);
   apply(parseRoute(location.pathname, location.search));
 }
@@ -99,8 +109,10 @@ export function navigate(url: string) {
 export function startRouter() {
   apply(parseRoute(location.pathname, location.search));
   addEventListener('popstate', () => {
+    // the browser already switched entries; an unwritten replacement would land on the wrong one
     if (replaceTimer) clearTimeout(replaceTimer);
     replaceTimer = null;
+    pendingReplace = null;
     fileIntent = false;
     apply(parseRoute(location.pathname, location.search));
   });

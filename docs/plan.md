@@ -362,3 +362,16 @@ MIT LICENSE, README covering the new features.
 8. The CI summary and polling use GitHub's aggregate counts (`checkRunCountsByState`, `statusContextCountsByState`),
    so a capped list can't read green.
 9. Conversation loads newest first (`last/before`, ≤ 10 pages each) and says when older items exist.
+
+### v2 code-review outcomes (Sol @ xhigh)
+
+Pass 1, 9 findings, all fixed:
+1. Conversation paging declared unused GraphQL variables on later pages (the whole fetch failed past 100 items).
+2. Back to an entry whose file equals `current` kept an older jump target; a restored entry now always replaces it.
+3. A conversation fetch made stale by a finished write set a retry flag nothing consumed; it now refetches.
+4. A successful post cleared text typed while it was in flight.
+5. `reveal` outlived Back and later filter/focus/hide changes; both now clear it.
+6. Addition-only changes gave the old pane the new file's tokens; the old side is now highlighted on its own.
+7. Recent-PR viewed counts missed refreshes and rollbacks.
+8. A push dropped the throttled replacement of the entry being left (filter typed just before a tab change).
+9. Recent metadata was read when the debounce fired, possibly from the next PR; it is now captured at once.

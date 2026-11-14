@@ -226,14 +226,14 @@ const issueComment = (c: Raw): IssueComment => ({...c,author:c.author ?? null} a
 const review = (r: Raw): ReviewSummary => ({...r,author:r.author ?? null} as ReviewSummary);
 /** Newest first: up to 10 pages each of comments and reviews; `truncated` when older ones exist. */
 export async function fetchConversation(ref: PrRef): Promise<Conversation> {
-  const q = (comments: boolean, reviews: boolean) => `query($owner:String!,$repo:String!,$number:Int!,$cb:String,$rb:String) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { body bodyHTML createdAt ${comments ? `comments(last:100,before:$cb) { nodes { ${ISSUE_COMMENT} } pageInfo { hasPreviousPage startCursor } }` : ''} ${reviews ? `reviews(last:100,before:$rb,states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]) { nodes { ${REVIEW} } pageInfo { hasPreviousPage startCursor } }` : ''} } } }`;
+  const q = (comments: boolean, reviews: boolean) => `query($owner:String!,$repo:String!,$number:Int!${comments ? ',$cb:String' : ''}${reviews ? ',$rb:String' : ''}) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { body bodyHTML createdAt ${comments ? `comments(last:100,before:$cb) { nodes { ${ISSUE_COMMENT} } pageInfo { hasPreviousPage startCursor } }` : ''} ${reviews ? `reviews(last:100,before:$rb,states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]) { nodes { ${REVIEW} } pageInfo { hasPreviousPage startCursor } }` : ''} } } }`;
   const {data} = await gql<Raw>(q(true,true),vars(ref));
   const pr = data.repository?.pullRequest;
   if (!pr) throw new Error('Pull request not found');
   let comments: Raw[] = pr.comments.nodes, reviews: Raw[] = pr.reviews.nodes;
   let ci = pr.comments.pageInfo, ri = pr.reviews.pageInfo;
   for (let page = 1; page < 10 && (ci.hasPreviousPage || ri.hasPreviousPage); page++) {
-    const {data:next} = await gql<Raw>(q(ci.hasPreviousPage,ri.hasPreviousPage),{...vars(ref),cb:ci.hasPreviousPage ? ci.startCursor : null,rb:ri.hasPreviousPage ? ri.startCursor : null});
+    const {data:next} = await gql<Raw>(q(ci.hasPreviousPage,ri.hasPreviousPage),{...vars(ref),...(ci.hasPreviousPage ? {cb:ci.startCursor} : {}),...(ri.hasPreviousPage ? {rb:ri.startCursor} : {})});
     const p = next.repository.pullRequest;
     if (p.comments) { comments = [...p.comments.nodes,...comments]; ci = p.comments.pageInfo; }
     if (p.reviews) { reviews = [...p.reviews.nodes,...reviews]; ri = p.reviews.pageInfo; }

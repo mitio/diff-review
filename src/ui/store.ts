@@ -144,6 +144,13 @@ export const useStore = create<State>(() => ({
 const set = useStore.setState;
 const get = useStore.getState;
 
+// an explicit jump's reveal ends when the user narrows or re-scopes the view
+useStore.subscribe((s, p) => {
+  if (s.reveal && (s.focus !== p.focus || s.filter !== p.filter || s.repoRules !== p.repoRules || s.prRules !== p.prRules)) {
+    set({ reveal: null });
+  }
+});
+
 let toastId = 0;
 export function toast(text: string, error = false) {
   const id = ++toastId;
@@ -476,6 +483,7 @@ export async function refresh(manual = false) {
       const threads = mergeTemp(r.threads, st.threads);
       return { viewed, threads, threadsByPath: byPath(threads), pendingReviewId: r.pendingReviewId };
     });
+    recordRecent();
     if (manual) toast('Refreshed');
   } catch (e) {
     if (manual) toast(`Refresh failed: ${errText(e)}`, true);
@@ -576,6 +584,7 @@ async function flushViewed(b: ViewedBook) {
       return { viewed };
     });
     toast(`Could not update viewed state of ${rollback.length} file(s)`, true);
+    recordRecent();
   }
   if (b.queue.size) scheduleViewedFlush(b);
 }
@@ -799,18 +808,23 @@ export async function discard(): Promise<boolean> {
 
 // ---------- recent PRs ----------
 
+/** Snapshot taken now (the PR may change before the debounced write); one write per PR. */
+const recentQueue = new Map<string, () => void>();
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
 function recordRecent() {
-  if (recentTimer) return;
-  recentTimer = setTimeout(() => {
+  const { pr, viewed } = get();
+  if (!pr) return;
+  const patch = {
+    title: pr.title, author: pr.author, state: pr.state, isDraft: pr.isDraft, files: pr.changedFiles,
+    additions: pr.additions, deletions: pr.deletions, headOid: pr.headOid,
+    viewed: pr.files.filter(f => isViewed(viewed[f.path])).length,
+  };
+  const ref = pr.ref;
+  recentQueue.set(prId(ref), () => updateRecent(ref, patch));
+  recentTimer ??= setTimeout(() => {
     recentTimer = null;
-    const { pr, viewed } = get();
-    if (!pr) return;
-    updateRecent(pr.ref, {
-      title: pr.title, author: pr.author, state: pr.state, isDraft: pr.isDraft, files: pr.changedFiles,
-      additions: pr.additions, deletions: pr.deletions, headOid: pr.headOid,
-      viewed: pr.files.filter(f => isViewed(viewed[f.path])).length,
-    });
+    for (const write of recentQueue.values()) write();
+    recentQueue.clear();
   }, 300);
 }
 
@@ -848,8 +862,13 @@ export async function loadConversation() {
   try {
     const conv = await fetchConversation(ref);
     if (ls !== loadSeq || seq !== convSeq) return;
-    if (convWrites > 0 || epoch !== convEpoch) {
+    if (convWrites > 0) {
       convAgain = true;
+      return;
+    }
+    // a write finished while this was in flight: fetch again rather than show what predates it
+    if (epoch !== convEpoch) {
+      void loadConversation();
       return;
     }
     set(s => ({ conv: { ...conv, comments: [...conv.comments, ...(s.conv?.comments.filter(c => c.id.startsWith('tmp-')) ?? [])] } }));

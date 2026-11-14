@@ -76,12 +76,11 @@ export function highlightRows(rows: Pick<Row, 'kind' | 'text'>[], lang: string):
   const b: Array<Tok[] | null> = new Array(rows.length).fill(null);
   const newLines = tokenizeLines(newText, lang);
   newIdx.forEach((i, j) => { b[i] = newLines[j] ?? null; });
-  if (rows.some(r => r.kind === 'del')) {
+  if (oldText === newText) {
+    oldIdx.forEach(i => { a[i] = b[i]; });
+  } else if (oldIdx.length) {
     const oldLines = tokenizeLines(oldText, lang);
     oldIdx.forEach((i, j) => { a[i] = oldLines[j] ?? null; });
-  } else {
-    // nothing removed: the old side of every context row is the new side
-    oldIdx.forEach(i => { a[i] = b[i]; });
   }
   return { a, b };
 }
