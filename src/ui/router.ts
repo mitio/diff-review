@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { Category, PrRef } from '../types.ts';
 import { CATEGORIES } from '../lib/categorize.ts';
 import { parsePrUrl } from '../lib/github.ts';
-import { useStore, type Focus, type Tab } from './store.ts';
+import { streamFiles, useStore, type Focus, type Tab } from './store.ts';
 
 /** Everything the URL captures. Global preferences (split/unified, context, font) are deliberately not part of it. */
 export interface Route { ref: PrRef | null; tab: Tab; focus: Focus; q: string; file: string | null }
@@ -66,6 +66,9 @@ function apply(r: Route) {
     tab: r.tab, focus: r.focus, filter: r.q, reveal: null,
     pendingFile: r.file && (prChanged || r.file !== s.current) ? r.file : null,
   });
+  // the entry's file may need revealing again under the restored filters
+  const now = useStore.getState();
+  if (r.file && !now.pendingFile && now.pr && !streamFiles(now).some(f => f.path === r.file)) useStore.setState({ pendingFile: r.file });
 }
 
 function currentRoute(): Route | null {

@@ -77,7 +77,8 @@ export function highlightRows(rows: Pick<Row, 'kind' | 'text'>[], lang: string):
   const newLines = tokenizeLines(newText, lang);
   newIdx.forEach((i, j) => { b[i] = newLines[j] ?? null; });
   if (oldText === newText) {
-    oldIdx.forEach(i => { a[i] = b[i]; });
+    // same text on both sides (e.g. only line endings changed): reuse line by line
+    oldIdx.forEach((i, j) => { a[i] = b[newIdx[j]]; });
   } else if (oldIdx.length) {
     const oldLines = tokenizeLines(oldText, lang);
     oldIdx.forEach((i, j) => { a[i] = oldLines[j] ?? null; });

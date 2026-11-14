@@ -375,3 +375,8 @@ Pass 1, 9 findings, all fixed:
 7. Recent-PR viewed counts missed refreshes and rollbacks.
 8. A push dropped the throttled replacement of the entry being left (filter typed just before a tab change).
 9. Recent metadata was read when the debounce fired, possibly from the next PR; it is now captured at once.
+
+Pass 2, 3 findings, all fixed:
+1. Back to an entry whose (current) file is excluded by its restored filter lost the file; it is re-revealed.
+2. A viewed rollback for a PR no longer open didn't correct that PR's recent-PR count; it is shifted by the delta.
+3. Line-ending-only changes left deleted rows without tokens; identical texts now map line by line.

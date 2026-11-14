@@ -8,7 +8,7 @@ import {
   fetchChecks, fetchConversation, fetchPatches, loadPr, refreshPr, replyThread, resolveThread, setViewed, submitReview,
   updateComment, updateIssueComment,
 } from '../lib/github.ts';
-import { touchRecent, updateRecent } from '../lib/recent.ts';
+import { adjustRecentViewed, touchRecent, updateRecent } from '../lib/recent.ts';
 import { categorize, folderKey, isHidden } from '../lib/categorize.ts';
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
@@ -249,6 +249,7 @@ let dataGen = 0;
 
 interface ViewedBook {
   key: string;
+  ref: PrRef | null;
   nodeId: string | null;
   revision: string | null;
   confirmed: Map<string, ViewedState>;
@@ -261,7 +262,7 @@ interface ViewedBook {
   local: Map<string, ViewedState>;
 }
 const newBook = (key: string): ViewedBook => ({
-  key, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(),
+  key, ref: null, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(),
   timer: null, local: new Map(),
 });
 let book = newBook('');
@@ -291,6 +292,7 @@ export async function load(ref: PrRef) {
   if (book.queue.size) void flushViewed(book);
   const samePr = curKey() === key;
   book = books.get(key) ?? newBook(key);
+  book.ref = ref;
   books.set(key, book);
   touchRecent(ref);
   const seeded = dict<ViewedState>();
@@ -585,6 +587,8 @@ async function flushViewed(b: ViewedBook) {
     });
     toast(`Could not update viewed state of ${rollback.length} file(s)`, true);
     recordRecent();
+  } else if (rollback.length && b.ref) {
+    adjustRecentViewed(b.ref, rollback.reduce((n, [, v]) => n + (isViewed(v) ? 1 : -1), 0));
   }
   if (b.queue.size) scheduleViewedFlush(b);
 }

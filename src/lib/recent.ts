@@ -54,6 +54,12 @@ export function updateRecent(ref: PrRef, patch: Partial<Omit<RecentPr, 'owner' |
   save(list);
 }
 
+/** Shifts the stored viewed count (for a PR that is no longer open, whose full state isn't at hand). */
+export function adjustRecentViewed(ref: PrRef, delta: number) {
+  const e = listRecent().find(x => recentId(x) === recentId(ref));
+  if (e && delta) updateRecent(ref, { viewed: Math.max(0, Math.min(e.files || Infinity, e.viewed + delta)) });
+}
+
 export function removeRecent(ref: PrRef) {
   const id = recentId(ref);
   save(listRecent().filter(e => recentId(e) !== id));

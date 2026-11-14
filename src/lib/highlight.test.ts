@@ -49,6 +49,16 @@ describe('highlight', () => {
     expect(t.a[1]).not.toEqual([[10, 'hljs-comment']]);
   });
 
+  it('keeps old-side tokens when only line endings changed', () => {
+    const rows = [
+      { kind: 'del' as const, text: 'const a = 1;' },
+      { kind: 'add' as const, text: 'const a = 1;' },
+    ];
+    const t = highlightRows(rows, 'javascript')!;
+    expect(t.a[0]).toEqual(t.b[1]);
+    expect(t.a[0]![0]).toEqual([5, 'hljs-keyword']);
+  });
+
   it('gives context rows tokens from each side', () => {
     const rows = [
       { kind: 'del' as const, text: '/*' },
