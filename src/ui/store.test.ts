@@ -186,3 +186,48 @@ test('a snapshot of a new head replaces threads even while a write is in flight,
   await vi.advanceTimersByTimeAsync(400);
   expect(gh.refreshPr).toHaveBeenCalled();
 });
+
+test('a refresh requested while another runs is not lost', async () => {
+  await loaded();
+  const first = deferred<unknown>();
+  gh.refreshPr.mockReturnValueOnce(first.promise).mockResolvedValue({ changed: false, threads: [], viewed: {}, pendingReviewId: null });
+  const r = refresh();
+  void refresh();
+  first.resolve({ changed: false, threads: [], viewed: {}, pendingReviewId: null });
+  await r;
+  await vi.advanceTimersByTimeAsync(10);
+  expect(gh.refreshPr).toHaveBeenCalledTimes(2);
+});
+
+test('a refresh from before a reload cannot mark the reloaded PR stale', async () => {
+  await loaded();
+  const old = deferred<unknown>();
+  gh.refreshPr.mockReturnValue(old.promise);
+  const r = refresh();
+  const fresh = deferred<PrData>();
+  gh.loadPr.mockReturnValue(fresh.promise);
+  const reloading = load(ref);
+  old.resolve({ changed: true, baseOid: 'b', headOid: 'h2' });
+  await r;
+  gh.currentOids.mockResolvedValue({ baseOid: 'b', headOid: 'h2' });
+  fresh.resolve(pr({ headOid: 'h2' }));
+  await reloading;
+  expect(useStore.getState().stale).toBe(false);
+});
+
+test('a new revision on reload overrides a viewed mark that completed during the reload', async () => {
+  await loaded();
+  const write = deferred<Array<{ path: string; ok: boolean }>>();
+  gh.setViewed.mockReturnValue(write.promise);
+  markViewed(['a.ts'], true);
+  await vi.advanceTimersByTimeAsync(200);
+  const fresh = deferred<PrData>();
+  gh.loadPr.mockReturnValue(fresh.promise);
+  gh.currentOids.mockResolvedValue({ baseOid: 'b', headOid: 'h2' });
+  const reloading = load(ref);
+  write.resolve([{ path: 'a.ts', ok: true }]);
+  await flush();
+  fresh.resolve(pr({ headOid: 'h2', files: pr().files.map(f => (f.path === 'a.ts' ? { ...f, viewed: 'DISMISSED' as const } : f)) }));
+  await reloading;
+  expect(useStore.getState().viewed['a.ts']).toBe('DISMISSED');
+});

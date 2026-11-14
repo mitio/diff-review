@@ -225,6 +225,7 @@ let dataGen = 0;
 interface ViewedBook {
   key: string;
   nodeId: string | null;
+  revision: string | null;
   confirmed: Map<string, ViewedState>;
   seq: Map<string, number>;
   inflight: Set<string>;
@@ -233,7 +234,7 @@ interface ViewedBook {
   timer: ReturnType<typeof setTimeout> | null;
 }
 const newBook = (key: string): ViewedBook => ({
-  key, nodeId: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(), timer: null,
+  key, nodeId: null, revision: null, confirmed: new Map(), seq: new Map(), inflight: new Set(), touched: new Map(), queue: new Map(), timer: null,
 });
 let book = newBook('');
 
@@ -328,11 +329,13 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
   }
   dataGen++;
   book.nodeId = pr.id;
+  const newRevision = book.revision !== null && book.revision !== revision(pr);
+  book.revision = revision(pr);
   // local threads are only worth keeping over a snapshot of the same revision (their anchors match)
   const keepLocal = !!prev && sameRev && !threadsSafeSince(epoch);
   if (!threadsSafeSince(epoch)) needReconcile();
   set(s => {
-    const viewed = mergeServerViewed(s.viewed, pr.files.map(f => [f.path, f.viewed]), started);
+    const viewed = mergeServerViewed(s.viewed, pr.files.map(f => [f.path, f.viewed]), newRevision ? Infinity : started);
     const threads = keepLocal ? s.threads : mergeTemp(pr.threads, s.threads);
     return {
       pr, loading: false, revalidating: fromCache, viewed, threads, threadsByPath: byPath(threads),
@@ -411,17 +414,23 @@ export async function loadBigDiff(f: PrFile) {
 }
 
 let refreshing = false;
+let refreshAgain = false;
 export async function refresh(manual = false) {
   const s = get();
-  if (!s.pr || refreshing || s.stale) return;
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
+  if (!s.pr || s.stale) return;
   refreshing = true;
   const started = performance.now();
   const epoch = writeEpoch;
   const gen = dataGen;
+  const ls = loadSeq;
   const pr0 = s.pr;
   try {
     const r = await refreshPr(pr0.ref, { baseOid: pr0.baseOid, headOid: pr0.headOid });
-    if (gen !== dataGen) return;
+    if (gen !== dataGen || ls !== loadSeq) return;
     if (r.changed) {
       set({ stale: true });
       return;
@@ -440,6 +449,10 @@ export async function refresh(manual = false) {
     if (manual) toast(`Refresh failed: ${errText(e)}`, true);
   } finally {
     refreshing = false;
+    if (refreshAgain) {
+      refreshAgain = false;
+      setTimeout(() => void refresh(), 0);
+    }
   }
 }
 
