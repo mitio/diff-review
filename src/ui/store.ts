@@ -233,7 +233,8 @@ export function openedFiles(s: Pick<State, 'opened'>): PrFile[] {
   }
   return openedMemo.files;
 }
-const diffPaths = (pr: PrData) => new Set(pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])));
+/** a copy's source still exists unchanged, so only a rename's old path counts */
+const diffPaths = (pr: PrData) => new Set(pr.files.flatMap(f => (f.previousPath && f.status === 'renamed' ? [f.path, f.previousPath] : [f.path])));
 
 export const isViewed = (v: ViewedState | undefined) => v === 'VIEWED';
 
@@ -686,7 +687,10 @@ export function openPaths(paths: string[]) {
 }
 
 export function closeOpened(path: string) {
-  set(s => ({ opened: s.opened.filter(p => p !== path), blobs: drop(s.blobs, path) }));
+  set(s => ({
+    opened: s.opened.filter(p => p !== path), blobs: drop(s.blobs, path), composers: drop(s.composers, path),
+    selAnchor: s.selAnchor?.path === path ? null : s.selAnchor, dragSel: s.dragSel?.path === path ? null : s.dragSel,
+  }));
 }
 
 /** The opened files' contents, from the tree that matches the head for files the diff doesn't touch. */
@@ -696,7 +700,8 @@ async function fetchOpened(paths: string[]) {
   const fetcher = pr && blobFetcher(pr);
   if (!pr || !oid || !fetcher || !paths.length) return;
   const rev = revision(pr);
-  const valid = () => !!get().pr && revision(get().pr!) === rev;
+  const ls = loadSeq;
+  const valid = () => ls === loadSeq && !!get().pr && revision(get().pr!) === rev;
   set(s => {
     const blobs = dict(s.blobs);
     for (const p of paths) blobs[p] = 'loading';
@@ -725,13 +730,14 @@ export async function loadTree() {
   const t = get().tree;
   if (t === 'loading' || (t && t.rev === rev && !('error' in t))) return;
   set({ tree: 'loading' });
+  const ls = loadSeq;
   let tree: FileTree;
   try {
     tree = { rev, ...(await listFiles(pr)) };
   } catch (e) {
     tree = { rev, error: errText(e) };
   }
-  if (get().pr && revision(get().pr!) === rev) set({ tree });
+  if (ls === loadSeq && get().pr && revision(get().pr!) === rev) set({ tree });
 }
 
 let refreshing = false;

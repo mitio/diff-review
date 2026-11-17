@@ -59,6 +59,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
     if (bigDiff && typeof bigDiff === 'object' && 'rows' in bigDiff) return { rows: bigDiff.rows, complete: true };
     if (!file.patch && !isUnchanged(file)) return null;
     const text = blob && blob !== 'loading' && !blob.binary && !blob.truncated && !blob.missing ? blob.text : null;
+    if (isUnchanged(file) && text === null) return null;
     return buildModel(file, parsed(file), text);
     // keyed on content, not the file object: a fresh snapshot of the same revision must keep the model (and its highlighting)
   }, [file.path, file.patch, file.status, blob, bigDiff]);

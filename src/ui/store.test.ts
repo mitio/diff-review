@@ -9,8 +9,10 @@ const gh = vi.hoisted(() => ({
 }));
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
-const lr = vi.hoisted(() => ({ opens: 0, adds: 0, loadSource: vi.fn() }));
-vi.mock('../lib/sources.ts', () => ({ loadSource: lr.loadSource, fetchLocalBlobs: async () => new Map(), contentOid: () => null, listFiles: async () => ({ paths: [], truncated: false }) }));
+const lr = vi.hoisted(() => ({ opens: 0, adds: 0, loadSource: vi.fn(), fetchLocalBlobs: vi.fn(), contentOid: vi.fn() }));
+vi.mock('../lib/sources.ts', () => ({
+  loadSource: lr.loadSource, fetchLocalBlobs: lr.fetchLocalBlobs, contentOid: lr.contentOid, listFiles: async () => ({ paths: [], truncated: false }),
+}));
 vi.mock('../lib/localstate.ts', () => ({
   LocalReview: class {
     key: string;
@@ -27,7 +29,7 @@ vi.mock('../lib/localstate.ts', () => ({
 }));
 
 import { listRecent } from '../lib/recent.ts';
-import { createThread, load, markViewed, openComposer, postComment, refresh, removeComment, useStore } from './store.ts';
+import { closeOpened, createThread, load, markViewed, openComposer, openPaths, postComment, refresh, removeComment, useStore } from './store.ts';
 
 const mem = new Map<string, string>();
 globalThis.localStorage = {
@@ -61,6 +63,8 @@ const flush = () => vi.advanceTimersByTimeAsync(1);
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   for (const f of Object.values(gh)) f.mockReset();
+  lr.fetchLocalBlobs.mockReset().mockResolvedValue(new Map());
+  lr.contentOid.mockReset().mockReturnValue(null);
   gh.currentOids.mockResolvedValue({ baseOid: 'b', headOid: 'h' });
   gh.fetchBlobs.mockResolvedValue(new Map());
   gh.ensurePendingReview.mockResolvedValue('R');
@@ -389,4 +393,52 @@ test('a local refresh started before a newer load finished does not install its 
   await refreshing;
   await flush();
   expect(useStore.getState().pr?.headOid).toBe('worktree:3');
+});
+
+const OID = 'c'.repeat(40);
+const blobOf = (text: string) => ({ text, binary: false, truncated: false, missing: false });
+
+test("a copy's unchanged source can be opened; a rename's old path cannot", async () => {
+  const localRef = { kind: 'local' as const, repo: '/r4', range: '' };
+  lr.contentOid.mockReturnValue(OID);
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({
+    ref: r as PrData['ref'], id: 'local:/r4:', headOid: 'worktree:1', files: [
+      { path: 'copy.ts', previousPath: 'src.ts', status: 'copied', additions: 0, deletions: 0, viewed: 'UNVIEWED' },
+      { path: 'new.ts', previousPath: 'old.ts', status: 'renamed', additions: 0, deletions: 0, viewed: 'UNVIEWED' },
+    ],
+  }));
+  await load(localRef);
+  await flush();
+  openPaths(['src.ts', 'old.ts', 'copy.ts']);
+  expect(useStore.getState().opened).toEqual(['src.ts']);
+});
+
+test('closing an opened file drops its open comment box', async () => {
+  const localRef = { kind: 'local' as const, repo: '/r5', range: '' };
+  lr.contentOid.mockReturnValue(OID);
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r5:', headOid: 'worktree:1' }));
+  await load(localRef);
+  await flush();
+  openPaths(['x.ts']);
+  openComposer('x.ts', { kind: 'line', a: { side: 'RIGHT', line: 1 }, b: { side: 'RIGHT', line: 1 } });
+  closeOpened('x.ts');
+  expect(useStore.getState().composers['x.ts']).toBeUndefined();
+});
+
+test("a file fetch from a review left behind cannot overwrite the next review's contents", async () => {
+  lr.contentOid.mockReturnValue(OID);
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], headOid: 'worktree:1' }));
+  await load({ kind: 'local', repo: '/r6', range: '' });
+  await flush();
+  const old = deferred<Map<string, unknown>>();
+  lr.fetchLocalBlobs.mockReturnValueOnce(old.promise);
+  openPaths(['x.ts']);
+  await load({ kind: 'local', repo: '/r7', range: '' });
+  await flush();
+  lr.fetchLocalBlobs.mockResolvedValueOnce(new Map([[`${OID}:x.ts`, blobOf('new')]]));
+  openPaths(['x.ts']);
+  await flush();
+  old.reject(new Error('gone'));
+  await flush();
+  expect(useStore.getState().blobs['x.ts']).toEqual(blobOf('new'));
 });

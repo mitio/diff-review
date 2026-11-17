@@ -43,6 +43,8 @@ function FinderPanel() {
   }, [paths, q, pr, opened]);
 
   useEffect(() => setSel(0), [q]);
+  // a new revision drops the listing; list it again while the finder is open
+  useEffect(() => { if (tree === null) void loadTree(); }, [tree]);
   useEffect(() => {
     listRef.current?.querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
   }, [sel]);
