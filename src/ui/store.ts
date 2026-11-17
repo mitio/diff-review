@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type {
-  BlobResult, Category, Checks, Comment, Conversation, HideRule, IssueComment, NewThread, PrData, PrFile, PrRef, ReviewEvent, Row,
-  Thread, ViewedState,
+  BlobResult, BlobSpec, Category, Checks, Comment, Conversation, HideRule, IssueComment, NewThread, PrData, PrFile, ReviewEvent,
+  ReviewRef, Row, Thread, ViewedState,
 } from '../types.ts';
 import {
   addIssueComment, addThread, currentOids, deleteComment, deleteIssueComment, discardReview, ensurePendingReview, fetchBlobs,
@@ -12,6 +12,10 @@ import { touchRecent, updateRecent, type RecentPr } from '../lib/recent.ts';
 import { categorize, folderKey, isHidden, sidebarOrder } from '../lib/categorize.ts';
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
+import { ghRepo, isPr, prRef, refKey } from '../lib/refs.ts';
+import { fetchLocalBlobs, loadSource } from '../lib/sources.ts';
+import { LocalReview, toThreads, viewedStates } from '../lib/localstate.ts';
+import { exportMarkdown, sourceLine } from '../lib/export.ts';
 
 export type ViewMode = 'unified' | 'split';
 export type Grouping = 'tree' | 'category' | 'flat';
@@ -57,7 +61,7 @@ const drop = <T,>(d: Dict<T>, k: string): Dict<T> => {
 };
 
 interface State {
-  ref: PrRef | null;
+  ref: ReviewRef | null;
   pr: PrData | null;
   loading: boolean;
   error: string | null;
@@ -116,15 +120,19 @@ const write = (key: string, v: unknown) => {
   try { localStorage.setItem(key, JSON.stringify(v)); } catch { /* quota */ }
 };
 
-const prId = (r: PrRef) => `${r.owner}/${r.repo}#${r.number}`;
+const prId = refKey;
 const curKey = () => {
   const r = useStore.getState().ref;
   return r ? prId(r) : '';
 };
 /** Writes finishing after a switch to another PR must not touch the new PR's state. */
 const onPr = (key: string) => curKey() === key;
-const repoKey = (r: PrRef) => `ghr:rules:${r.owner}/${r.repo}`;
-const prKey = (r: PrRef) => `ghr:rules:${prId(r)}`;
+/** Folder, category and glob rules apply to every review of the same repo. */
+const repoKey = (r: ReviewRef) => {
+  const g = ghRepo(r);
+  return `ghr:rules:${g ? `${g.owner}/${g.repo}` : r.kind === 'local' ? `local:${r.repo}` : 'paste'}`;
+};
+const prKey = (r: ReviewRef) => `ghr:rules:${prId(r)}`;
 /** localStorage key for unsent text, scoped to the open PR. */
 export const draftKey = (k: string) => {
   const r = useStore.getState().ref;
@@ -203,6 +211,14 @@ export function streamFiles(s: State): PrFile[] {
 
 export const isViewed = (v: ViewedState | undefined) => v === 'VIEWED';
 
+/** Comments and viewed state stay on this machine (everything but PRs). */
+export const isLocalReview = (s: Pick<State, 'ref'>) => !!s.ref && !isPr(s.ref);
+
+/** Unresolved threads of a local review. */
+export function openCount(s: Pick<State, 'threads'>) {
+  return s.threads.filter(t => !t.isResolved).length;
+}
+
 export function pendingCount(s: Pick<State, 'threads' | 'pr'>) {
   const me = s.pr?.viewer.login;
   let n = 0;
@@ -255,7 +271,7 @@ let dataGen = 0;
 
 interface ViewedBook {
   key: string;
-  ref: PrRef | null;
+  ref: ReviewRef | null;
   nodeId: string | null;
   revision: string | null;
   confirmed: Map<string, ViewedState>;
@@ -296,7 +312,7 @@ function mergeServerViewed(cur: Dict<ViewedState>, server: Iterable<[string, Vie
 // ---------- loading ----------
 
 let loadSeq = 0;
-export async function load(ref: PrRef) {
+export async function load(ref: ReviewRef) {
   const seq = ++loadSeq;
   const started = performance.now();
   const epoch = writeEpoch;
@@ -315,7 +331,9 @@ export async function load(ref: PrRef) {
     blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(),
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
-  const freshP = loadPr(ref);
+  if (!isPr(ref)) return loadOther(ref, seq, key);
+  detachLocal();
+  const freshP = loadPr(prRef(ref));
   freshP.catch(() => {});
   void loadChecks();
   void loadConversation();
@@ -329,7 +347,7 @@ export async function load(ref: PrRef) {
     let final = get().pr!;
     if (final.files.some(missingPatch)) {
       try {
-        const patches = await fetchPatches(ref);
+        const patches = await fetchPatches(prRef(ref));
         if (seq !== loadSeq || get().pr?.headOid !== final.headOid) return;
         final = fillPatches(get().pr!, patches);
         set({ pr: final });
@@ -339,7 +357,7 @@ export async function load(ref: PrRef) {
       }
     }
     void putPr(key, final);
-    const now = await currentOids(ref);
+    const now = await currentOids(prRef(ref));
     if (seq === loadSeq && (now.baseOid !== final.baseOid || now.headOid !== final.headOid)) set({ stale: true });
   } catch (e) {
     if (seq !== loadSeq) return;
@@ -348,6 +366,120 @@ export async function load(ref: PrRef) {
   } finally {
     if (seq === loadSeq) set({ revalidating: false });
   }
+}
+
+// ---------- local reviews (commits, compares, local and pasted diffs) ----------
+
+let local: LocalReview | null = null;
+let unsubLocal: (() => void) | null = null;
+function detachLocal() {
+  unsubLocal?.();
+  unsubLocal = null;
+  local = null;
+}
+function attachLocal(lr: LocalReview) {
+  detachLocal();
+  local = lr;
+  unsubLocal = lr.onReplace((_doc, reason) => {
+    if (local !== lr) return;
+    syncLocal();
+    toast(reason, true);
+  });
+}
+/** Threads and viewed state from the local review's doc (its pending writes included). */
+function syncLocal() {
+  const s = get();
+  if (!s.pr || !local || local.key !== refKey(s.pr.ref)) return;
+  const doc = local.doc();
+  const threads = toThreads(doc, s.pr.viewer);
+  set({ threads, threadsByPath: byPath(threads), viewed: viewedStates(doc, s.pr.files) });
+}
+
+async function loadOther(ref: ReviewRef, seq: number, key: string) {
+  const freshP = loadSource(ref);
+  freshP.catch(() => {});
+  const docP = LocalReview.open(ref, '');
+  docP.catch(() => {});
+  const cached = await getPr(key);
+  if (seq !== loadSeq) return;
+  try {
+    const lr = await docP;
+    if (seq !== loadSeq) return;
+    attachLocal(lr);
+    if (cached) applyOther(cached, seq, true);
+    const pr = await freshP;
+    if (seq !== loadSeq) return;
+    applyOther(pr, seq, false);
+    lr.setTitle(pr.title);
+    void putPr(key, pr);
+  } catch (e) {
+    if (seq !== loadSeq) return;
+    if (cached && get().pr) toast(`Showing cached copy; refresh failed: ${errText(e)}`, true);
+    else set({ loading: false, error: errText(e) });
+  } finally {
+    if (seq === loadSeq) set({ revalidating: false });
+  }
+}
+
+function applyOther(pr: PrData, seq: number, fromCache: boolean) {
+  const prev = get().pr;
+  const sameRev = !!prev && revision(prev) === revision(pr);
+  dataGen++;
+  set(s => ({
+    pr, loading: false, revalidating: fromCache,
+    current: s.current ?? pr.files[0]?.path ?? null,
+    ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict() }),
+  }));
+  syncLocal();
+  if (typeof document !== 'undefined') document.title = `${pr.title} · diff-review`;
+  recordRecent();
+  if (!sameRev) void prefetchBlobs(seq);
+}
+
+async function refreshOther(manual: boolean) {
+  const ref = get().ref!;
+  const ls = loadSeq;
+  const gen = dataGen;
+  const pr = await loadSource(ref);
+  if (ls !== loadSeq || gen !== dataGen) return;
+  // pick up comments written elsewhere (another tab, the CLI) once nothing is pending here
+  if (local) {
+    const lr = local;
+    await lr.flush();
+    const fresh = await LocalReview.open(ref, pr.title);
+    if (ls !== loadSeq || local !== lr) return;
+    if (fresh.doc().version !== lr.doc().version) attachLocal(fresh);
+  }
+  applyOther(pr, ls, false);
+  void putPr(refKey(ref), pr);
+  if (manual) toast('Refreshed');
+}
+
+/** Wraps a local write for the "saving…" indicator; failures already replaced the state (onReplace). */
+async function localWrite<T>(p: Promise<T>): Promise<T | undefined> {
+  set(s => ({ busy: s.busy + 1 }));
+  syncLocal();
+  try {
+    return await p;
+  } catch (e) {
+    console.warn('local write failed', e);
+    return undefined;
+  } finally {
+    set(s => ({ busy: s.busy - 1 }));
+    syncLocal();
+  }
+}
+
+/** The local review's comments as Markdown (for an agent). */
+export function exportLocal(includeResolved: boolean): string | null {
+  const s = get();
+  if (!local || !s.pr || local.key !== refKey(s.pr.ref)) return null;
+  return exportMarkdown(local.doc(), { source: sourceLine(s.pr.ref), order: s.pr.files.map(f => f.path), includeResolved });
+}
+
+/** Remembers which local threads no longer match the code, so the CLI export can say so. */
+export function setLocalOutdated(flags: Record<string, boolean>) {
+  local?.setOutdated(flags);
 }
 
 const missingPatch = (f: PrFile) => !f.patch && f.additions + f.deletions > 0;
@@ -395,17 +527,27 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
       ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict() }),
     };
   });
-  if (typeof document !== "undefined") document.title = `${pr.title} · #${pr.ref.number}`;
+  if (typeof document !== 'undefined' && isPr(pr.ref)) document.title = `${pr.title} · #${pr.ref.number}`;
   recordRecent();
   if (!sameRev) void prefetchBlobs(seq);
 }
 
 const needsHeadBlob = (f: PrFile) => !!f.patch && f.status !== 'added' && f.status !== 'removed';
 
+type BlobFetcher = (specs: BlobSpec[]) => Promise<Map<string, BlobResult>>;
+/** null: the source has no file contents (pasted diffs) */
+function blobFetcher(pr: PrData): BlobFetcher | null {
+  const r = pr.ref;
+  if (r.kind === 'local') return specs => fetchLocalBlobs(r.repo, specs);
+  const g = ghRepo(r);
+  return g ? specs => fetchBlobs({ ...g, number: 0 }, specs) : null;
+}
+
 async function prefetchBlobs(seq: number, only?: Set<string>) {
   const s0 = get();
   const pr = s0.pr!;
-  const ref = pr.ref;
+  const fetcher = blobFetcher(pr);
+  if (!fetcher) return;
   const rev = revision(pr);
   const valid = () => seq === loadSeq && !!get().pr && revision(get().pr!) === rev;
   const files = [...pr.files].sort((a, b) => Number(fileHidden(s0, a)) - Number(fileHidden(s0, b)));
@@ -424,7 +566,7 @@ async function prefetchBlobs(seq: number, only?: Set<string>) {
       const chunk = chunks[next++];
       let res: Map<string, BlobResult> | null = null;
       try {
-        res = await fetchBlobs(ref, chunk.map(f => ({ commit: pr.headOid, path: f.path })));
+        res = await fetcher(chunk.map(f => ({ commit: pr.headOid, path: f.path })));
       } catch (e) {
         console.warn('blob fetch failed', e);
       }
@@ -450,7 +592,9 @@ export async function loadBigDiff(f: PrFile) {
     const basePath = f.previousPath || f.path;
     if (f.status !== 'added') specs.push({ commit: pr.mergeBaseOid, path: basePath });
     if (f.status !== 'removed') specs.push({ commit: pr.headOid, path: f.path });
-    const res = await fetchBlobs(pr.ref, specs);
+    const fetcher = blobFetcher(pr);
+    if (!fetcher) throw new Error('a pasted diff has no file contents');
+    const res = await fetcher(specs);
     const base = f.status === 'added' ? '' : res.get(`${pr.mergeBaseOid}:${basePath}`);
     const head = f.status === 'removed' ? '' : res.get(`${pr.headOid}:${f.path}`);
     const txt = (b: BlobResult | '' | undefined) => (b === '' ? '' : b && !b.binary && !b.truncated ? b.text : null);
@@ -475,6 +619,20 @@ export async function refresh(manual = false) {
   }
   if (!s.pr || s.stale) return;
   refreshing = true;
+  if (!isPr(s.pr.ref)) {
+    try {
+      await refreshOther(manual);
+    } catch (e) {
+      if (manual) toast(`Refresh failed: ${errText(e)}`, true);
+    } finally {
+      refreshing = false;
+      if (refreshAgain) {
+        refreshAgain = false;
+        setTimeout(() => void refresh(), 0);
+      }
+    }
+    return;
+  }
   void loadChecks();
   void loadConversation();
   const started = performance.now();
@@ -483,7 +641,8 @@ export async function refresh(manual = false) {
   const ls = loadSeq;
   const pr0 = s.pr;
   try {
-    const r = await refreshPr(pr0.ref, { baseOid: pr0.baseOid, headOid: pr0.headOid });
+    if (!isPr(pr0.ref)) return;
+    const r = await refreshPr(prRef(pr0.ref), { baseOid: pr0.baseOid, headOid: pr0.headOid });
     if (gen !== dataGen || ls !== loadSeq) return;
     if (r.changed) {
       set({ stale: true });
@@ -528,6 +687,7 @@ function mergeTemp(server: Thread[], local: Thread[]) {
 export function markViewed(paths: string[], viewed: boolean) {
   const s = get();
   if (!s.pr) return;
+  if (!isPr(s.pr.ref)) return markViewedLocal(paths, viewed);
   const b = book;
   const next = dict(s.viewed);
   const collapsed = dict(s.collapsed);
@@ -544,6 +704,22 @@ export function markViewed(paths: string[], viewed: boolean) {
   }
   set({ viewed: next, collapsed });
   scheduleViewedFlush(b);
+  recordRecent();
+}
+
+/** Each intent stores the fingerprint of the file as it was displayed when clicked. */
+function markViewedLocal(paths: string[], viewed: boolean) {
+  const s = get();
+  const lr = local;
+  if (!s.pr || !lr) return;
+  const files = new Map(s.pr.files.map(f => [f.path, f]));
+  const items = paths.filter(p => isViewed(s.viewed[p]) !== viewed && files.has(p))
+    .map(p => ({ path: p, fingerprint: viewed ? files.get(p)!.fingerprint ?? '' : null }));
+  if (!items.length) return;
+  const collapsed = dict(s.collapsed);
+  for (const it of items) delete collapsed[it.path];
+  set({ collapsed });
+  void localWrite(lr.setViewed(items));
   recordRecent();
 }
 
@@ -705,6 +881,7 @@ async function reviewId() {
 
 /** Returns true on success. */
 export async function createThread(t: NewThread): Promise<boolean> {
+  if (local && isLocalReview(get())) return (await localWrite(local.addThread(t))) !== undefined;
   const temp: Thread = {
     id: `tmp-${++tmpId}`, path: t.path, line: t.line ?? null, startLine: t.startLine ?? null, originalLine: t.line ?? null,
     side: t.side ?? 'RIGHT', startSide: t.startSide ?? null, isResolved: false, isOutdated: false,
@@ -725,6 +902,7 @@ export async function createThread(t: NewThread): Promise<boolean> {
 }
 
 export async function reply(threadId: string, body: string): Promise<boolean> {
+  if (local && isLocalReview(get())) return (await localWrite(local.reply(threadId, body))) !== undefined;
   const temp = viewerComment(body);
   const key = curKey();
   const patch = (fn: (cs: Comment[]) => Comment[]) => {
@@ -743,6 +921,7 @@ export async function reply(threadId: string, body: string): Promise<boolean> {
 }
 
 export async function editComment(id: string, body: string): Promise<boolean> {
+  if (local && isLocalReview(get())) return (await localWrite(local.edit(id, body))) !== undefined;
   const key = curKey();
   try {
     const real = await writing(() => updateComment(id, body));
@@ -755,6 +934,10 @@ export async function editComment(id: string, body: string): Promise<boolean> {
 }
 
 export async function removeComment(id: string) {
+  if (local && isLocalReview(get())) {
+    await localWrite(local.remove(id));
+    return;
+  }
   const ts0 = get().threads;
   const tIdx = ts0.findIndex(t => t.comments.some(c => c.id === id));
   if (tIdx < 0) return;
@@ -787,6 +970,10 @@ export async function removeComment(id: string) {
 }
 
 export async function setResolved(threadId: string, resolved: boolean) {
+  if (local && isLocalReview(get())) {
+    await localWrite(local.resolve(threadId, resolved));
+    return;
+  }
   const key = curKey();
   const flip = (v: boolean) => onPr(key) &&
     setThreads(ts => ts.map(t => (t.id === threadId ? { ...t, isResolved: v, viewerCanResolve: !v, viewerCanUnresolve: v } : t)));
@@ -838,11 +1025,11 @@ export async function discard(): Promise<boolean> {
 
 // ---------- recent PRs ----------
 
-type RecentPatch = Partial<Omit<RecentPr, 'owner' | 'repo' | 'number' | 'openedAt'>>;
+type RecentPatch = Partial<Omit<RecentPr, 'ref' | 'openedAt'>>;
 /** Debounced writes, merged per PR; values are taken when queued (the open PR may change before the write). */
-const recentQueue = new Map<string, { ref: PrRef; patch: RecentPatch }>();
+const recentQueue = new Map<string, { ref: ReviewRef; patch: RecentPatch }>();
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
-function queueRecent(ref: PrRef, patch: RecentPatch) {
+function queueRecent(ref: ReviewRef, patch: RecentPatch) {
   const k = prId(ref);
   recentQueue.set(k, { ref, patch: { ...recentQueue.get(k)?.patch, ...patch } });
   recentTimer ??= setTimeout(flushRecent, 300);
@@ -869,11 +1056,11 @@ function recordRecent() {
 let checksSeq = 0;
 export async function loadChecks() {
   const ref = get().ref;
-  if (!ref) return;
+  if (!isPr(ref)) return;
   const ls = loadSeq;
   const seq = ++checksSeq;
   try {
-    const checks = await fetchChecks(ref);
+    const checks = await fetchChecks(prRef(ref));
     if (ls === loadSeq && seq === checksSeq) set({ checks });
   } catch (e) {
     console.warn('checks unavailable', e);
@@ -891,12 +1078,12 @@ let convSeq = 0;
 let convAgain = false;
 export async function loadConversation() {
   const ref = get().ref;
-  if (!ref) return;
+  if (!isPr(ref)) return;
   const ls = loadSeq;
   const seq = ++convSeq;
   const epoch = convEpoch;
   try {
-    const conv = await fetchConversation(ref);
+    const conv = await fetchConversation(prRef(ref));
     if (ls !== loadSeq || seq !== convSeq) return;
     if (convWrites > 0) {
       convAgain = true;

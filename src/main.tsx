@@ -8,7 +8,7 @@ startRouter();
 
 function Root() {
   const ref = useRoute(s => s.ref);
-  return ref ? <App prRef={ref} /> : <Home />;
+  return ref ? <App reviewRef={ref} /> : <Home />;
 }
 
 createRoot(document.getElementById('root')!).render(

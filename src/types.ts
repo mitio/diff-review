@@ -1,6 +1,19 @@
 export type ViewedState = 'VIEWED' | 'UNVIEWED' | 'DISMISSED';
 export type Side = 'LEFT' | 'RIGHT';
 export interface PrRef { owner: string; repo: string; number: number }
+
+/** What is being reviewed. Only 'pr' talks to GitHub for comments and viewed state; the rest keep them locally. */
+export type ReviewRef =
+  | ({ kind: 'pr' } & PrRef)
+  /** sha as typed (7-40 hex) */
+  | { kind: 'commit'; owner: string; repo: string; sha: string }
+  /** refs or shas as typed */
+  | { kind: 'compare'; owner: string; repo: string; base: string; head: string }
+  /** repo = absolute git toplevel (realpath); range '' = uncommitted changes incl. untracked */
+  | { kind: 'local'; repo: string; range: string }
+  /** id = sha256 hex of the diff text */
+  | { kind: 'paste'; id: string };
+export type ReviewKind = ReviewRef['kind'];
 export interface User { login: string; avatarUrl: string }
 
 export interface PrFile {
@@ -11,6 +24,8 @@ export interface PrFile {
   deletions: number;
   patch?: string;
   viewed: ViewedState;
+  /** non-PR sources: identifies this version of the file's change (see unidiff.ts) */
+  fingerprint?: string;
 }
 
 export interface Comment {
@@ -42,10 +57,12 @@ export interface Thread {
   viewerCanUnresolve: boolean;
   viewerCanReply: boolean;
   comments: Comment[];
+  /** local threads: the lines the comment was made on */
+  quote?: QuoteLine[];
 }
 
 export interface PrData {
-  ref: PrRef;
+  ref: ReviewRef;
   id: string;
   title: string;
   url: string;
@@ -64,6 +81,8 @@ export interface PrData {
   files: PrFile[];
   threads: Thread[];
   pendingReviewId: string | null;
+  /** non-PR sources: GitHub listed only part of the files and the full .diff was unavailable */
+  truncated?: boolean;
 }
 
 export type RefreshResult =
@@ -150,6 +169,8 @@ export interface NewThread {
   side?: Side;
   startLine?: number;
   startSide?: Side;
+  /** local sources: rows startIdx..endIdx of the rendered model */
+  quote?: QuoteLine[];
 }
 
 export type CheckBucket = 'ok' | 'fail' | 'pending' | 'skipped';
@@ -204,4 +225,61 @@ export interface RecentStatus {
   headOid: string;
   reviewDecision: string | null;
   ci: string | null;
+}
+
+/** One quoted row; 'gap' stands for lines that were not loaded (text ''). */
+export interface QuoteLine { kind: 'ctx' | 'del' | 'add' | 'gap'; text: string }
+
+export interface LocalComment { id: string; body: string; createdAt: string; updatedAt?: string }
+export interface LocalThread {
+  id: string;
+  path: string;
+  subjectType: 'LINE' | 'FILE';
+  side: Side;
+  line: number | null;
+  startSide: Side | null;
+  startLine: number | null;
+  /** [] for FILE threads */
+  quote: QuoteLine[];
+  /** last computed by the UI; read by the CLI export */
+  outdated: boolean;
+  resolved: boolean;
+  comments: LocalComment[];
+}
+/** Comments and viewed state of a non-PR review, stored by the server as JSON. */
+export interface ReviewDoc {
+  key: string;
+  ref: ReviewRef;
+  title: string;
+  /** 0 = never saved; the server increments it on every PUT */
+  version: number;
+  updatedAt: string;
+  /** path -> PrFile.fingerprint of the version marked viewed */
+  viewed: Record<string, string>;
+  threads: LocalThread[];
+}
+export interface ReviewSummaryRow {
+  key: string;
+  ref: ReviewRef;
+  title: string;
+  updatedAt: string;
+  threads: number;
+  /** unresolved */
+  open: number;
+  viewed: number;
+}
+
+/** GET /api/local/diff */
+export interface LocalDiff {
+  root: string;
+  range: string;
+  /** the left side actually diffed (commit oid, or the empty tree) */
+  baseOid: string;
+  /** commit oid, or 'worktree:<16 hex>' */
+  headOid: string;
+  /** = baseOid */
+  mergeBaseOid: string;
+  title: string;
+  author: { name: string; email: string } | null;
+  diff: string;
 }

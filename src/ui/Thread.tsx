@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import type { Comment, NewThread, Thread } from '../types.ts';
-import { createThread, draftKey, editComment, removeComment, reply, setResolved, useStore } from './store.ts';
+import { createThread, draftKey, editComment, isLocalReview, removeComment, reply, setResolved, useStore } from './store.ts';
 import { UserLink, relTime } from './bits.tsx';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
@@ -92,13 +92,14 @@ export function NewComment({ path, label, initial, target, onDone }: {
   target: NewThread;
   onDone: () => void;
 }) {
+  const local = useStore(s => isLocalReview(s));
   return (
     <div className="thread">
       <div className="thead"><b>{label ?? 'Comment on file'}</b></div>
       <Editor
         draftId={`new:${path}:${target.subjectType}`}
         initial={initial}
-        submitLabel="Add to review"
+        submitLabel={local ? 'Add comment' : 'Add to review'}
         onSubmit={async body => {
           onDone();
           return createThread({ ...target, body });

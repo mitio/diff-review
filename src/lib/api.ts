@@ -34,3 +34,25 @@ export async function restText(path: string): Promise<string> {
   }
   return text;
 }
+
+export async function local<T>(path: string, init?: {method?: string; body?: unknown}): Promise<T> {
+  const response = await fetch(`/api/${path.replace(/^\//, '')}`, {
+    ...(init?.method ? {method:init.method} : {}),
+    headers:{'x-ghr':'1', ...(init?.body !== undefined ? {'content-type':'application/json'} : {})},
+    ...(init?.body !== undefined ? {body:JSON.stringify(init.body)} : {}),
+  });
+  const data = await read(response);
+  if (!response.ok) throw new ApiError(data.message || `HTTP ${response.status}`, response.status);
+  return data;
+}
+
+export async function localText(path: string): Promise<string> {
+  const response = await fetch(`/api/${path.replace(/^\//, '')}`, {headers:{'x-ghr':'1'}});
+  const text = await response.text();
+  if (!response.ok) {
+    let message = text;
+    try { message = JSON.parse(text).message ?? text; } catch { /* plain text */ }
+    throw new ApiError(message || `HTTP ${response.status}`, response.status);
+  }
+  return text;
+}

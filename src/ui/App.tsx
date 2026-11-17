@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Check, CheckBucket, PrRef, RecentStatus, ReviewEvent } from '../types.ts';
-import { fetchRecentStatus, parsePrUrl } from '../lib/github.ts';
+import type { Check, CheckBucket, RecentStatus, ReviewEvent, ReviewRef } from '../types.ts';
+import { fetchRecentStatus } from '../lib/github.ts';
 import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent.ts';
+import { appPath, githubUrl, isPr, parseReviewInput, prRef, refKey } from '../lib/refs.ts';
+import { createPaste } from '../lib/sources.ts';
 import {
-  ALL, discard, dismissToast, flushRecent, toast, toggleOutline, draftKey, headChecks, loadChecks, openComposer, setCollapsed, fileHidden, isViewed, load, pendingCount,
-  refresh, streamFiles, submit, updateSettings, useStore, type Tab,
+  ALL, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
+  openCount, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
 import { navigate, onLinkClick, sameRef, useRoute } from './router.ts';
@@ -18,7 +20,18 @@ import { onMainScroll, scrollToFile, stepFile, toggleViewedCurrent } from './nav
 
 const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
 
-export function App({ prRef: ref }: { prRef: PrRef }) {
+/** Short name of what is being reviewed. */
+export function refLabel(r: ReviewRef): string {
+  switch (r.kind) {
+    case 'pr': return `${r.owner}/${r.repo}#${r.number}`;
+    case 'commit': return `${r.owner}/${r.repo}@${r.sha.slice(0, 7)}`;
+    case 'compare': return `${r.owner}/${r.repo} ${r.base}...${r.head}`;
+    case 'local': return `${r.repo.split('/').pop()} · ${r.range || 'uncommitted'}`;
+    case 'paste': return `pasted diff ${r.id.slice(0, 7)}`;
+  }
+}
+
+export function App({ reviewRef: ref }: { reviewRef: ReviewRef }) {
   const pr = useStore(s => s.pr);
   const loading = useStore(s => s.loading);
   const error = useStore(s => s.error);
@@ -26,13 +39,14 @@ export function App({ prRef: ref }: { prRef: PrRef }) {
   const width = useStore(s => s.settings.sidebarWidth);
   const fontSize = useStore(s => s.settings.fontSize);
 
-  useEffect(() => { void load(ref); }, [ref.owner, ref.repo, ref.number]);
+  useEffect(() => { void load(ref); }, [refKey(ref)]);
   useEffect(() => { document.documentElement.style.setProperty('--diff-font', `${fontSize}px`); }, [fontSize]);
   useKeys();
   useEffect(() => {
     let last = 0;
     const onFocus = () => {
-      if (Date.now() - last < 30_000) return;
+      // a local diff changes as you (or an agent) edit, so it refreshes more eagerly
+      if (Date.now() - last < (isLocalReview(useStore.getState()) ? 5_000 : 30_000)) return;
       last = Date.now();
       void refresh();
     };
@@ -51,14 +65,14 @@ export function App({ prRef: ref }: { prRef: PrRef }) {
   if (error) {
     return (
       <div className="center">
-        <p>Failed to load {ref.owner}/{ref.repo}#{ref.number}</p>
+        <p>Failed to load {refLabel(ref)}</p>
         <pre style={{ whiteSpace: 'pre-wrap' }}>{error}</pre>
         <button onClick={() => void load(ref)}>Retry</button>{' '}
         <a className="btn" href="/" onClick={onLinkClick}>Home</a>
       </div>
     );
   }
-  if (loading || !pr) return <div className="center">Loading {ref.owner}/{ref.repo}#{ref.number}…</div>;
+  if (loading || !pr) return <div className="center">Loading {refLabel(ref)}…</div>;
 
   return (
     <div className="app">
@@ -88,7 +102,7 @@ function Main({ tab }: { tab: Tab }) {
         <DiffStream />
       </main>
       {tab === 'overview' && <div className="overlay"><Overview /></div>}
-      {tab === 'conversation' && <div className="overlay"><Conversation /></div>}
+      {tab === 'conversation' && isPr(useStore.getState().ref) && <div className="overlay"><Conversation /></div>}
     </div>
   );
 }
@@ -130,7 +144,7 @@ function DiffStream() {
     } else if (pr.files.some(f => f.path === pendingFile)) {
       useStore.setState({ reveal: pendingFile });
     } else if (!useStore.getState().revalidating) {
-      toast(`${pendingFile} is not part of this PR`);
+      toast(`${pendingFile} is not part of this diff`);
       useStore.setState({ pendingFile: null });
     }
   }, [files, pendingFile, pr]);
@@ -157,40 +171,25 @@ function DiffStream() {
 }
 
 function TopBar() {
-  const pr = useStore(s => s.pr)!;
-  const viewed = useStore(s => s.viewed);
+  const local = useStore(s => isLocalReview(s));
+  return local ? <LocalTopBar /> : <PrTopBar />;
+}
+
+/** Controls both top bars share: tabs, view mode, context, font. */
+function ViewControls({ conversation }: { conversation: boolean }) {
   const tab = useStore(s => s.tab);
   const settings = useStore(s => s.settings);
-  const pending = useStore(s => pendingCount(s));
-  const hasDraft = useStore(s => !!s.pendingReviewId);
-  const busy = useStore(s => s.busy);
-  const revalidating = useStore(s => s.revalidating);
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
   const conv = useStore(s => s.conv);
   const nConv = conv ? conv.comments.length + conv.reviews.filter(r => r.body.trim()).length : null;
   const tabBtn = (t: Tab, label: string, key: string) => (
     <button className={tab === t ? 'on' : ''} onClick={() => useStore.setState({ tab: t })} title={`${label} (${key})`}>{label}</button>
   );
   return (
-    <div className="topbar">
-      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent PRs">⌂</a>
-      <a className="title" href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
-      <a className="muted" href={pr.url} target="_blank" rel="noreferrer">#{pr.ref.number}</a>
-      <span className={`chip ${pr.isDraft ? 'draft' : `state-${pr.state}`}`}>{pr.isDraft ? 'Draft' : pr.state.toLowerCase()}</span>
-      <UserLink user={pr.author} />
-      <span className="refs" title={`${pr.baseRefName} ← ${pr.headRefName}`}>{pr.baseRefName} ← {pr.headRefName}</span>
-      <span className="chip">{pr.files.length} files</span>
-      <span className="chip"><span className="add">+{pr.additions}</span> <span className="del">−{pr.deletions}</span></span>
-      <span className="chip" title="Viewed files">✓ {nViewed}/{pr.files.length}</span>
-      <ChecksChip />
-      <span className="spacer" />
-      {busy > 0 && <span className="faint">saving…</span>}
-      {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
+    <>
       <span className="seg">
         {tabBtn('overview', 'Overview', 'o')}
         {tabBtn('diff', 'Diff', 'd')}
-        {tabBtn('conversation', nConv ? `Conversation · ${nConv}` : 'Conversation', 't')}
+        {conversation && tabBtn('conversation', nConv ? `Conversation · ${nConv}` : 'Conversation', 't')}
       </span>
       <span className="seg" title="Toggle with s">
         <button className={settings.viewMode === 'unified' ? 'on' : ''} onClick={() => updateSettings({ viewMode: 'unified' })}>Unified</button>
@@ -203,6 +202,127 @@ function TopBar() {
         <button className="icon" onClick={() => updateSettings({ fontSize: Math.max(9, settings.fontSize - 1) })}>A−</button>
         <button className="icon" onClick={() => updateSettings({ fontSize: Math.min(18, settings.fontSize + 1) })}>A+</button>
       </span>
+    </>
+  );
+}
+
+function LocalTopBar() {
+  const pr = useStore(s => s.pr)!;
+  const viewed = useStore(s => s.viewed);
+  const busy = useStore(s => s.busy);
+  const revalidating = useStore(s => s.revalidating);
+  const open = useStore(s => openCount(s));
+  const [exportOpen, setExportOpen] = useState(false);
+  const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
+  const gh = githubUrl(pr.ref);
+  const r = pr.ref;
+  return (
+    <div className="topbar">
+      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent reviews">⌂</a>
+      {gh
+        ? <a className="title" href={gh} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
+        : <span className="title" title={pr.title}>{pr.title}</span>}
+      {r.kind === 'local' && <span className="muted mono" title={r.repo}>{r.repo.split('/').pop()}</span>}
+      {pr.author && <UserLink user={pr.author} />}
+      {(pr.baseRefName || pr.headRefName) && (
+        <span className="refs mono" title={`${pr.baseOid} ← ${pr.headOid}`}>{pr.baseRefName} ← {pr.headRefName}</span>
+      )}
+      <span className="chip">{pr.files.length} files</span>
+      <span className="chip"><span className="add">+{pr.additions}</span> <span className="del">−{pr.deletions}</span></span>
+      <span className="chip" title="Viewed files">✓ {nViewed}/{pr.files.length}</span>
+      <span className="spacer" />
+      {busy > 0 && <span className="faint">saving…</span>}
+      {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
+      <ViewControls conversation={false} />
+      <span style={{ position: 'relative' }}>
+        <button className={open ? 'primary' : ''} onClick={() => setExportOpen(!exportOpen)} title="Copy or download the comments as Markdown">
+          Comments{open ? ` · ${open}` : ''}
+        </button>
+        {exportOpen && <ExportPanel onClose={() => setExportOpen(false)} />}
+      </span>
+      <button className="icon" title="Keyboard shortcuts (?)" onClick={() => useStore.setState({ help: true })}>?</button>
+    </div>
+  );
+}
+
+function ExportPanel({ onClose }: { onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const threads = useStore(s => s.threads);
+  const r = useStore(s => s.pr!.ref);
+  const [all, setAll] = useState(false);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
+    const t = setTimeout(() => document.addEventListener('mousedown', onDown));
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', onDown); };
+  }, [onClose]);
+  const open = threads.filter(t => !t.isResolved).length;
+  const resolved = threads.length - open;
+  const n = all ? threads.length : open;
+  const copy = async () => {
+    const md = exportLocal(all);
+    if (md == null) return;
+    try {
+      await navigator.clipboard.writeText(md);
+      toast(`Copied ${n} thread${n === 1 ? '' : 's'} as Markdown`);
+      onClose();
+    } catch (e) {
+      toast(`Copy failed: ${e instanceof Error ? e.message : String(e)}`, true);
+    }
+  };
+  const download = () => {
+    const md = exportLocal(all);
+    if (md == null) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+    a.download = 'review.md';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    onClose();
+  };
+  const quoted = (x: string) => (/^[A-Za-z0-9_./~^@{}:+-]+$/.test(x) ? x : `'${x}'`);
+  const cli = r.kind === 'local' ? `diff-review export${r.range ? ` ${quoted(r.range)}` : ''}` : null;
+  return (
+    <div className="popover" ref={ref} style={{ right: 0, top: 30, width: 340 }} onKeyDown={e => { if (e.key === 'Escape') onClose(); }}>
+      <h3>Comments</h3>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+        {open} open{resolved ? `, ${resolved} resolved` : ''}. Stored on this machine only.
+        {cli && <> In the repo, <code style={{ display: 'inline', whiteSpace: 'nowrap' }}>{cli}</code> prints them.</>}
+      </div>
+      {resolved > 0 && <label><input type="checkbox" checked={all} onChange={e => setAll(e.target.checked)} /> Include resolved</label>}
+      <div className="row" style={{ marginTop: 8 }}>
+        <span className="spacer" />
+        <button disabled={!n} onClick={download}>Download .md</button>
+        <button className="primary" disabled={!n} onClick={() => void copy()}>Copy Markdown</button>
+      </div>
+    </div>
+  );
+}
+
+function PrTopBar() {
+  const pr = useStore(s => s.pr)!;
+  const viewed = useStore(s => s.viewed);
+  const pending = useStore(s => pendingCount(s));
+  const hasDraft = useStore(s => !!s.pendingReviewId);
+  const busy = useStore(s => s.busy);
+  const revalidating = useStore(s => s.revalidating);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
+  return (
+    <div className="topbar">
+      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent PRs">⌂</a>
+      <a className="title" href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
+      <a className="muted" href={pr.url} target="_blank" rel="noreferrer">#{isPr(pr.ref) ? pr.ref.number : ''}</a>
+      <span className={`chip ${pr.isDraft ? 'draft' : `state-${pr.state}`}`}>{pr.isDraft ? 'Draft' : pr.state.toLowerCase()}</span>
+      <UserLink user={pr.author} />
+      <span className="refs" title={`${pr.baseRefName} ← ${pr.headRefName}`}>{pr.baseRefName} ← {pr.headRefName}</span>
+      <span className="chip">{pr.files.length} files</span>
+      <span className="chip"><span className="add">+{pr.additions}</span> <span className="del">−{pr.deletions}</span></span>
+      <span className="chip" title="Viewed files">✓ {nViewed}/{pr.files.length}</span>
+      <ChecksChip />
+      <span className="spacer" />
+      {busy > 0 && <span className="faint">saving…</span>}
+      {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
+      <ViewControls conversation />
       <span style={{ position: 'relative' }}>
         <button className={hasDraft || pending ? 'primary' : ''} onClick={() => setReviewOpen(!reviewOpen)}>
           Review{pending ? ` · ${pending} pending` : ''}
@@ -294,6 +414,11 @@ function Banners() {
           GitHub lists only {pr.files.length} of {pr.changedFiles} changed files. Group actions apply to listed files only.
         </div>
       )}
+      {pr.truncated && pr.files.length >= pr.changedFiles && (
+        <div className="banner">
+          GitHub listed only the first {pr.files.length} files, and the full diff was too large to fetch.
+        </div>
+      )}
     </>
   );
 }
@@ -320,7 +445,7 @@ const KEYS: Array<[string, string]> = [
   ['/', 'filter files'],
   ['r', 'refresh comments + viewed state'],
   ['c', 'comment on current file'],
-  ['⌘↵', 'add comment to review'],
+  ['⌘↵', 'add comment'],
   ['?', 'this help'],
 ];
 
@@ -365,7 +490,7 @@ function useKeys() {
         case '=': case '+': updateSettings({ fontSize: Math.min(18, st.fontSize + 1) }); break;
         case 'o': useStore.setState({ tab: 'overview' }); break;
         case 'd': useStore.setState({ tab: 'diff' }); break;
-        case 't': useStore.setState({ tab: 'conversation' }); break;
+        case 't': if (isPr(s.ref)) useStore.setState({ tab: 'conversation' }); break;
         case 'h': updateSettings({ highlight: !st.highlight }); break;
         case 'r': void refresh(true); break;
         case 'c': if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
@@ -432,55 +557,103 @@ function CheckRow({ c }: { c: Check }) {
   );
 }
 
-const prPath = (r: PrRef) => `/${r.owner}/${r.repo}/pull/${r.number}`;
-
 export function Home() {
   const [v, setV] = useState('');
   const [err, setErr] = useState('');
+  const [pasting, setPasting] = useState(false);
   const [recent, setRecent] = useState<RecentPr[]>(() => { flushRecent(); return listRecent(); });
   const [live, setLive] = useState<Map<string, RecentStatus> | null>(null);
   useEffect(() => {
-    document.title = 'gh-review';
+    document.title = 'diff-review';
     const list = listRecent();
     setRecent(list);
-    if (!list.length) return;
+    const prs = list.flatMap(e => (isPr(e.ref) ? [prRef(e.ref)] : []));
+    if (!prs.length) return;
     let cancelled = false;
-    fetchRecentStatus(list).then(m => { if (!cancelled) setLive(m); }).catch(e => console.warn('recent status unavailable', e));
+    fetchRecentStatus(prs).then(m => { if (!cancelled) setLive(m); }).catch(e => console.warn('recent status unavailable', e));
     return () => { cancelled = true; };
   }, []);
   const origin = location.origin;
-  const bookmarklet = `javascript:(()=>{const m=location.href.match(/github\\.com\\/([^/]+\\/[^/]+\\/pull\\/\\d+)/);if(m)location.href='${origin}/'+m[1];})()`;
+  const bookmarklet = `javascript:(()=>{const m=location.href.match(/github\\.com(\\/[^/]+\\/[^/]+\\/(pull\\/\\d+|commit\\/[0-9a-f]+|compare\\/[^?#]+))/);if(m)location.href='${origin}'+m[1];})()`;
   return (
     <div className="home">
-      <h2 style={{ margin: 0 }}>gh-review</h2>
+      <h2 style={{ margin: 0 }}>diff-review</h2>
       <form onSubmit={e => {
         e.preventDefault();
-        const r = parsePrUrl(v.trim());
-        if (!r) { setErr('Not a PR URL'); return; }
-        navigate(prPath(r));
+        const r = parseReviewInput(v);
+        if (!r) { setErr('Not a GitHub PR, commit or compare URL'); return; }
+        navigate(appPath(r, 'diff'));
       }}>
-        <input autoFocus placeholder="https://github.com/owner/repo/pull/123" value={v} onChange={e => { setV(e.target.value); setErr(''); }} data-1p-ignore />
+        <input autoFocus placeholder="GitHub PR, commit or compare URL" value={v} onChange={e => { setV(e.target.value); setErr(''); }} data-1p-ignore />
         <button className="primary" type="submit">Open</button>
+        <button type="button" className={pasting ? 'on' : ''} onClick={() => setPasting(!pasting)}>Paste a diff</button>
       </form>
       {err && <div className="del">{err}</div>}
+      {pasting && <PasteDiff />}
       {recent.length > 0 && (
         <table className="recent">
           <tbody>
             {recent.map(r => (
-              <RecentRow key={recentId(r)} r={r} live={live?.get(recentId(r))} onRemove={() => { removeRecent(r); setRecent(listRecent()); }} />
+              <RecentRow key={recentId(r)} r={r} live={live?.get(recentId(r))} onRemove={() => { removeRecent(r.ref); setRecent(listRecent()); }} />
             ))}
           </tbody>
         </table>
       )}
       <div className="muted">
-        Or replace <code style={{ display: 'inline' }}>https://github.com</code> with <code style={{ display: 'inline' }}>{origin}</code> in any PR URL.
-        Bookmarklet (drag to your bookmarks bar):{' '}
+        Or replace <code style={{ display: 'inline' }}>https://github.com</code> with <code style={{ display: 'inline' }}>{origin}</code> in a PR,
+        commit or compare URL. Bookmarklet (drag to your bookmarks bar):{' '}
         {/* React blocks javascript: hrefs, so set it on the DOM node directly */}
-        <a ref={el => { el?.setAttribute('href', bookmarklet); }}>Review in gh-review</a>
+        <a ref={el => { el?.setAttribute('href', bookmarklet); }}>Review in diff-review</a>.
+        Local changes: run <code style={{ display: 'inline' }}>diff-review</code> in a git repo
+        (<code style={{ display: 'inline' }}>diff-review main...</code>, <code style={{ display: 'inline' }}>diff-review -c HEAD</code>,{' '}
+        <code style={{ display: 'inline' }}>git diff | diff-review -</code>).
       </div>
     </div>
   );
 }
+
+function PasteDiff() {
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const go = async (diff: string) => {
+    if (!diff.trim()) return;
+    setBusy(true);
+    try {
+      navigate(`/paste/${await createPaste(diff)}`);
+    } catch (e) {
+      toast(`Could not store the diff: ${e instanceof Error ? e.message : String(e)}`, true);
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="paste"
+      onDragOver={e => e.preventDefault()}
+      onDrop={e => {
+        e.preventDefault();
+        const f = e.dataTransfer.files[0];
+        if (f) void f.text().then(t => { setText(t); void go(t); });
+      }}
+    >
+      <textarea
+        autoFocus
+        rows={10}
+        className="mono"
+        placeholder="Paste the output of git diff, git show or git format-patch, or drop a .diff/.patch file here"
+        value={text}
+        onChange={e => setText(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void go(text); } }}
+      />
+      <div className="row">
+        <span className="faint">⌘↵ to review</span>
+        <span className="spacer" />
+        <button className="primary" disabled={busy || !text.trim()} onClick={() => void go(text)}>Review</button>
+      </div>
+    </div>
+  );
+}
+
+const KIND_LABEL: Record<ReviewRef['kind'], string> = { pr: 'PR', commit: 'commit', compare: 'compare', local: 'local', paste: 'pasted' };
 
 const DECISION: Record<string, [string, string]> = {
   APPROVED: ['approved', 'review-APPROVED'], CHANGES_REQUESTED: ['changes requested', 'review-CHANGES_REQUESTED'], REVIEW_REQUIRED: ['review required', ''],
@@ -488,30 +661,33 @@ const DECISION: Record<string, [string, string]> = {
 const CI_BUCKET: Record<string, CheckBucket> = { SUCCESS: 'ok', FAILURE: 'fail', ERROR: 'fail', PENDING: 'pending', EXPECTED: 'pending' };
 
 function RecentRow({ r, live, onRemove }: { r: RecentPr; live: RecentStatus | undefined; onRemove: () => void }) {
+  const pr = isPr(r.ref);
   const state = live?.state ?? r.state;
   const draft = live?.isDraft ?? r.isDraft;
   const moved = !!live && !!r.headOid && live.headOid !== r.headOid;
   const decision = live?.reviewDecision ? DECISION[live.reviewDecision] : undefined;
   const ci = live?.ci ? CI_BUCKET[live.ci] : undefined;
+  const gh = githubUrl(r.ref);
+  const href = appPath(r.ref, 'diff');
   return (
     <tr>
       <td className="rtitle">
-        <a href={prPath(r)} onClick={onLinkClick} title={live?.title ?? r.title}>{live?.title ?? r.title}</a>
+        <a href={href} onClick={onLinkClick} title={live?.title ?? r.title}>{live?.title ?? r.title}</a>
         <div className="faint">
-          {r.owner}/{r.repo}#{r.number}
+          <span title={r.ref.kind === 'local' ? r.ref.repo : undefined}>{refLabel(r.ref)}</span>
           {r.files > 0 && <> · {r.viewed}/{r.files} viewed · <span className="add">+{r.additions}</span> <span className="del">−{r.deletions}</span></>}
         </div>
       </td>
-      <td><UserLink user={r.author} /></td>
+      <td>{(pr || r.author) && <UserLink user={r.author} />}</td>
       <td className="chips">
-        <span className={`chip ${draft ? 'draft' : `state-${state}`}`}>{draft ? 'Draft' : state.toLowerCase()}</span>
+        {pr ? <span className={`chip ${draft ? 'draft' : `state-${state}`}`}>{draft ? 'Draft' : state.toLowerCase()}</span> : <span className="chip">{KIND_LABEL[r.ref.kind]}</span>}
         {ci && <span className={`chip ci-${ci}`} title={`CI: ${live!.ci!.toLowerCase()}`}>CI {BUCKET_ICON[ci]}</span>}
         {decision && <span className={`chip ${decision[1]}`}>{decision[0]}</span>}
         {moved && <span className="chip warn" title="New commits since you last opened it">new commits</span>}
       </td>
       <td className="faint" title={new Date(r.openedAt).toISOString()}>{relTime(new Date(r.openedAt).toISOString())}</td>
       <td className="acts">
-        <a className="btn small" href={`https://github.com/${r.owner}/${r.repo}/pull/${r.number}`} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>
+        {gh && <a className="btn small" href={gh} target="_blank" rel="noreferrer" title="Open on GitHub">↗</a>}
         <button className="small" title="Remove from this list" onClick={onRemove}>×</button>
       </td>
     </tr>

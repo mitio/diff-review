@@ -1,17 +1,14 @@
 import { create } from 'zustand';
-import type { Category, PrRef } from '../types.ts';
+import type { Category, ReviewRef } from '../types.ts';
 import { CATEGORIES } from '../lib/categorize.ts';
-import { parsePrUrl } from '../lib/github.ts';
+import { appPath, parseAppPath, sameReview } from '../lib/refs.ts';
 import { streamFiles, useStore, type Focus, type Tab } from './store.ts';
 
 /** Everything the URL captures. Global preferences (split/unified, context, font) are deliberately not part of it. */
-export interface Route { ref: PrRef | null; tab: Tab; focus: Focus; q: string; file: string | null }
-
-const TABS: Tab[] = ['diff', 'overview', 'conversation'];
+export interface Route { ref: ReviewRef | null; tab: Tab; focus: Focus; q: string; file: string | null }
 
 export function parseRoute(pathname: string, search: string): Route {
-  const m = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/(overview|conversation))?\/?$/.exec(pathname);
-  const ref = m ? parsePrUrl(`${decodeURIComponent(m[1])}/${decodeURIComponent(m[2])}/pull/${m[3]}`) : null;
+  const parsed = parseAppPath(pathname, search);
   const p = new URLSearchParams(search);
   let focus: Focus = null;
   const only = p.get('only') ?? '';
@@ -19,28 +16,28 @@ export function parseRoute(pathname: string, search: string): Route {
   const dir = /^dir:(\d+):(.+)$/.exec(only);
   if (cat && (CATEGORIES as string[]).includes(cat[1])) focus = { kind: 'category', key: cat[1] as Category };
   else if (dir) focus = { kind: 'folder', depth: Number(dir[1]), key: dir[2] };
-  return { ref, tab: (m?.[4] as Tab | undefined) ?? 'diff', focus, q: p.get('q') ?? '', file: p.get('file') || null };
+  let tab: Tab = parsed?.tab ?? 'diff';
+  // only PRs have a conversation
+  if (tab === 'conversation' && parsed?.ref.kind !== 'pr') tab = 'diff';
+  return { ref: parsed?.ref ?? null, tab, focus, q: p.get('q') ?? '', file: p.get('file') || null };
 }
 
 export function routeUrl(r: Route): string {
   if (!r.ref) return '/';
-  const path = `/${r.ref.owner}/${r.ref.repo}/pull/${r.ref.number}${r.tab === 'diff' ? '' : `/${r.tab}`}`;
   const p = new URLSearchParams();
   if (r.focus) p.set('only', r.focus.kind === 'category' ? `cat:${r.focus.key}` : `dir:${r.focus.depth}:${r.focus.key}`);
   if (r.q) p.set('q', r.q);
   if (r.file && r.tab === 'diff') p.set('file', r.file);
-  const qs = p.toString();
-  return qs ? `${path}?${qs}` : path;
+  return appPath(r.ref, r.tab, p);
 }
 
 /** The part of the URL that gets its own history entry when it changes. */
 const major = (r: Route) => routeUrl({ ...r, q: '', file: null });
 
 /** Which PR (or Home) is on screen. */
-export const useRoute = create<{ ref: PrRef | null }>(() => ({ ref: null }));
+export const useRoute = create<{ ref: ReviewRef | null }>(() => ({ ref: null }));
 
-export const sameRef = (a: PrRef | null, b: PrRef | null) =>
-  a === b || (!!a && !!b && a.owner === b.owner && a.repo === b.repo && a.number === b.number);
+export const sameRef = sameReview;
 
 let lastMajor = '';
 let fileIntent = false;

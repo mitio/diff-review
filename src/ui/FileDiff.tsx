@@ -1,9 +1,11 @@
 import { memo, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import type { FileModel, Item, PrFile, Row, Seg, Side, SplitItem, Thread } from '../types.ts';
-import { buildModel, lineAnchor, parsePatch, splitPairs, threadRowIndex, validRange, view, wordDiff, type RangeCheck } from '../lib/diff.ts';
+import { buildModel, lineAnchor, parsePatch, splitPairs, validRange, view, wordDiff, type RangeCheck } from '../lib/diff.ts';
+import { anchorStatus, locateThread, quoteRows } from '../lib/anchor.ts';
+import { ghRepo } from '../lib/refs.ts';
 import {
-  ALL, closeComposer, expand, fileHidden, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed, setOutlineOpen,
-  toast, toggleFileHidden, toggleOutline, toggleOutlineSection, useStore, type ComposerTarget,
+  ALL, closeComposer, expand, fileHidden, isLocalReview, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
+  setLocalOutdated, setOutlineOpen, toast, toggleFileHidden, toggleOutline, toggleOutlineSection, useStore, type ComposerTarget,
 } from './store.ts';
 import { Lazy } from './Lazy.tsx';
 import { NewComment, ThreadView } from './Thread.tsx';
@@ -15,6 +17,15 @@ import { outline } from '../lib/outline.ts';
 const EMPTY: never[] = [];
 const CHUNK = 400;
 const BIG = 3000;
+
+/** Where a thread renders (its end row), or -1. Local threads re-anchor by their quote; their stored flag is ignored. */
+const rowOf = (model: FileModel, t: Thread) => locateThread(model, t.quote?.length ? { ...t, isOutdated: false } : t);
+
+/** The file at the review's head on GitHub, if the review lives there. */
+export function githubBlobUrl(pr: { ref: Parameters<typeof ghRepo>[0]; headOid: string }, path: string) {
+  const g = ghRepo(pr.ref);
+  return g ? `https://github.com/${g.owner}/${g.repo}/blob/${pr.headOid}/${path}` : null;
+}
 
 const parsedCache = new WeakMap<PrFile, ReturnType<typeof parsePatch>>();
 function parsed(file: PrFile) {
@@ -37,7 +48,9 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   const pr = useStore(s => s.pr)!;
   const composer = useStore(s => s.composers[path]);
   const outlined = useStore(s => !!s.outline[path]);
+  const localReview = useStore(s => isLocalReview(s));
   const [forceBig, setForceBig] = useState(false);
+  const ghUrl = githubBlobUrl(pr, path);
 
   const collapsed = collapsedOverride ?? isViewed(viewed);
 
@@ -50,8 +63,24 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   }, [file.path, file.patch, file.status, blob, bigDiff]);
 
   const changed = file.additions + file.deletions;
-  const fileThreads = threads.filter(t => t.subjectType === 'FILE' || t.isOutdated || t.line == null);
-  const lineThreads = threads.filter(t => !fileThreads.includes(t));
+  /** per thread: itself if it goes under the header (file-level, outdated, or not placeable yet), else null */
+  const { located, flags } = useMemo(() => {
+    const flags: Record<string, boolean> = {};
+    if (!localReview) return { located: threads.map(t => (t.subjectType === 'FILE' || t.isOutdated || t.line == null ? t : null)), flags };
+    const located = threads.map(t => {
+      if (t.subjectType === 'FILE' || t.line == null) return t;
+      if (!model || !t.quote?.length) return t;
+      const st = anchorStatus(model, { ...t, isOutdated: false });
+      if (st !== 'unknown') flags[t.id] = st === 'outdated';
+      if (st === 'outdated') return t.isOutdated ? t : { ...t, isOutdated: true };
+      if (st === 'unknown' || rowOf(model, t) < 0) return t.isOutdated ? { ...t, isOutdated: false } : t;
+      return null;
+    });
+    return { located, flags };
+  }, [threads, model, localReview]);
+  const fileThreads = located.filter((t): t is Thread => !!t);
+  const lineThreads = threads.filter((_, i) => !located[i]);
+  useEffect(() => { if (localReview) setLocalOutdated(flags); }, [flags, localReview]);
 
   let body: ReactNode = null;
   if (!collapsed) {
@@ -71,19 +100,19 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
       body = (
         <div className="fnote">
           Can't show this diff: {bigDiff.error}.{' '}
-          <a href={`https://github.com/${pr.ref.owner}/${pr.ref.repo}/blob/${pr.headOid}/${path}`} target="_blank" rel="noreferrer">
-            Open on GitHub ↗
-          </a>
+          {ghUrl && <a href={ghUrl} target="_blank" rel="noreferrer">Open on GitHub ↗</a>}
         </div>
       );
     } else if (file.status === 'renamed' && changed === 0) {
       body = <div className="fnote">Renamed without changes.</div>;
     } else if (changed === 0) {
       body = <div className="fnote">No textual changes (binary file or mode change).</div>;
+    } else if (pr.ref.kind === 'paste') {
+      body = <div className="fnote">The pasted diff has no text for this file (binary or omitted).</div>;
     } else {
       body = (
         <div className="fnote">
-          GitHub didn't render this diff (too large or binary).{' '}
+          {localReview ? 'No text diff for this file (too large or binary).' : "GitHub didn't render this diff (too large or binary)."}{' '}
           <button className="small" onClick={() => loadBigDiff(file)}>Load diff</button>
         </div>
       );
@@ -113,8 +142,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         <button className="small" title={hidden ? 'Unhide' : 'Hide this file'} onClick={() => toggleFileHidden(file)}>
           {hidden ? 'Unhide' : 'Hide'}
         </button>
-        <a className="btn small" title="View file at head on GitHub" target="_blank" rel="noreferrer"
-          href={`https://github.com/${pr.ref.owner}/${pr.ref.repo}/blob/${pr.headOid}/${path}`}>↗</a>
+        {ghUrl && <a className="btn small" title="View file at head on GitHub" target="_blank" rel="noreferrer" href={ghUrl}>↗</a>}
         <label title="Mark viewed (v)">
           <input type="checkbox" checked={isViewed(viewed)} onChange={e => markViewed([path], e.target.checked)} /> Viewed
         </label>
@@ -147,6 +175,7 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const hlOn = useStore(s => s.settings.highlight) && hlReady;
   const toks = useHighlight(model, path, hlOn);
   const viewMode = useStore(s => s.settings.viewMode);
+  const anyLine = useStore(s => isLocalReview(s));
   const ctxSetting = useStore(s => s.settings.context);
   const stored = useStore(s => s.expansions[path]) ?? EMPTY;
   const context = ctxSetting >= ALL ? Infinity : ctxSetting;
@@ -155,7 +184,7 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
     const m = new Map<number, Thread[]>();
     const orphans: Thread[] = [];
     for (const t of threads) {
-      const i = threadRowIndex(model, t);
+      const i = rowOf(model, t);
       if (i < 0) orphans.push(t);
       else {
         const a = m.get(i);
@@ -169,8 +198,8 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const drag = useStore(s => (s.dragSel?.path === path ? s.dragSel : null));
   const lineComposer = useMemo(() => {
     const r = drag ?? (composer?.kind === 'line' ? composer : null);
-    return r ? validRange(model, r.a, r.b) : null;
-  }, [drag, composer, model]);
+    return r ? validRange(model, r.a, r.b, anyLine) : null;
+  }, [drag, composer, model, anyLine]);
   const sel = lineComposer?.ok ? lineComposer : null;
 
   const items = useMemo(() => {
@@ -197,7 +226,7 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
-  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn };
+  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn, anyLine };
 
   return (
     <>
@@ -227,7 +256,7 @@ function OutlineBody(props: BodyProps) {
   const toks = useHighlight(model, path, useStore(s => s.settings.highlight) && hlReady);
   const entries = useMemo(() => outline(model.rows, languageOf(path), toks && (i => inStringOrComment(model.rows[i], toks, i))), [model, path, toks]);
   const open = useStore(s => s.outlineOpen[path]) ?? EMPTY;
-  const threadRows = useMemo(() => threads.map(t => threadRowIndex(model, t)).filter(i => i >= 0), [threads, model]);
+  const threadRows = useMemo(() => threads.map(t => rowOf(model, t)).filter(i => i >= 0), [threads, model]);
   const changed = entries.filter(e => e.add + e.del > 0);
   return (
     <>
@@ -284,6 +313,8 @@ interface RowCtx {
   split: boolean;
   toks: RowToks | undefined;
   hlOn: boolean;
+  /** local review: every line is commentable */
+  anyLine: boolean;
 }
 
 function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) {
@@ -325,7 +356,7 @@ function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
         <td colSpan={4}>
           <div className="box">
             {ts?.map(t => <ThreadView key={t.id} thread={t} />)}
-            {isComposer && <LineComposer path={ctx.file.path} r={ctx.composer!} />}
+            {isComposer && <LineComposer path={ctx.file.path} r={ctx.composer!} model={ctx.model} />}
           </div>
         </td>
       </tr>,
@@ -333,11 +364,12 @@ function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
   }
 }
 
-function LineComposer({ path, r }: { path: string; r: Extract<RangeCheck, { ok: true }> }) {
+function LineComposer({ path, r, model }: { path: string; r: Extract<RangeCheck, { ok: true }>; model: FileModel }) {
   const single = r.startIdx === r.endIdx;
   const target = {
     path, body: '', subjectType: 'LINE' as const, line: r.line, side: r.side,
     ...(single ? {} : { startLine: r.startLine, startSide: r.startSide }),
+    quote: quoteRows(model, r.startIdx, r.endIdx),
   };
   const sideName = (x: Side) => (x === 'LEFT' ? 'old ' : '');
   const label = single
@@ -360,7 +392,7 @@ function onNumDown(e: MouseEvent<HTMLElement>, idx: number, ctx: RowCtx, clicked
   const row = ctx.model.rows[idx];
   const s = useStore.getState();
   const prev = s.selAnchor;
-  const anchor = lineAnchor(row, clicked);
+  const anchor = lineAnchor(row, clicked, ctx.anyLine);
   if (!anchor) {
     const n = clicked === 'LEFT' ? row.oldNo ?? row.newNo : row.newNo ?? row.oldNo;
     const quote = `\`L${n}\`${clicked === 'LEFT' || row.kind === 'del' ? ' (old)' : ''}\n> ${row.text.slice(0, 200)}\n\n`;
@@ -370,7 +402,7 @@ function onNumDown(e: MouseEvent<HTMLElement>, idx: number, ctx: RowCtx, clicked
     return;
   }
   if (e.shiftKey && prev && prev.path === path) {
-    const r = validRange(ctx.model, prev.anchor, anchor);
+    const r = validRange(ctx.model, prev.anchor, anchor, ctx.anyLine);
     if (!r.ok) {
       toast(r.reason, true);
       return;
@@ -379,19 +411,19 @@ function onNumDown(e: MouseEvent<HTMLElement>, idx: number, ctx: RowCtx, clicked
     return;
   }
   useStore.setState({ selAnchor: { path, anchor }, dragSel: { path, a: anchor, b: anchor } });
-  startDrag(e.currentTarget, ctx.model);
+  startDrag(e.currentTarget, ctx.model, ctx.anyLine);
 }
 
 /** Cells carry `data-idx` (and `data-side` where the side isn't implied by the row). */
-function startDrag(cell: HTMLElement, model: FileModel) {
+function startDrag(cell: HTMLElement, model: FileModel, anyLine: boolean) {
   const section = cell.closest('section.file');
   const onOver = (ev: globalThis.MouseEvent) => {
     const td = (ev.target as Element).closest?.<HTMLElement>('td[data-idx]');
     const d = useStore.getState().dragSel;
     if (!td || !d || td.closest('section.file') !== section) return;
     const row = model.rows[Number(td.dataset.idx)];
-    const b = row && lineAnchor(row, (td.dataset.side as Side | undefined) ?? d.a.side);
-    if (!b || (b.side === d.b.side && b.line === d.b.line) || !validRange(model, d.a, b).ok) return;
+    const b = row && lineAnchor(row, (td.dataset.side as Side | undefined) ?? d.a.side, anyLine);
+    if (!b || (b.side === d.b.side && b.line === d.b.line) || !validRange(model, d.a, b, anyLine).ok) return;
     useStore.setState({ dragSel: { ...d, b } });
   };
   const onUp = () => {
@@ -436,7 +468,7 @@ const SIGN = { add: '+', del: '−', ctx: ' ' } as const;
 
 const UnifiedRow = memo(function UnifiedRow({ idx, ctx }: { idx: number; ctx: RowCtx }) {
   const row = ctx.model.rows[idx];
-  const nc = row.hunk == null ? ' nc' : '';
+  const nc = row.hunk == null && !ctx.anyLine ? ' nc' : '';
   return (
     <tr className={`${row.kind}${inSel(ctx, idx) ? ' sel' : ''}${row.noEol ? ' noeol' : ''}`}>
       <td className={`num${nc}`} data-idx={idx} data-side="LEFT" onMouseDown={e => onNumDown(e, idx, ctx, 'LEFT')}>{row.oldNo ?? ''}</td>
@@ -454,7 +486,7 @@ const SplitRow = memo(function SplitRow({ left, right, ctx }: { left: number | n
   const half = (row: Row | null, idx: number | null, no: number | undefined, isRight: boolean) => {
     if (!row || idx == null) return [<td key="n" className="num empty" />, <td key="c" className="code empty" />];
     const k = row.kind === 'ctx' ? '' : row.kind;
-    const nc = row.hunk == null ? ' nc' : '';
+    const nc = row.hunk == null && !ctx.anyLine ? ' nc' : '';
     const noeol = row.noEol && (row.kind !== 'ctx' || isRight) ? ' noeol-c' : '';
     const side = isRight ? 'RIGHT' : 'LEFT';
     return [

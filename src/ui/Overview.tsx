@@ -193,14 +193,16 @@ function RulesPanel() {
     <div className="panel">
       <header>Hidden rules<span className="spacer" /><span className="muted" style={{ fontWeight: 400 }}>local only</span></header>
       <div className="rules">
-        <div className="muted" style={{ fontSize: 12 }}>For all PRs in {ref.owner}/{ref.repo}:</div>
+        <div className="muted" style={{ fontSize: 12 }}>
+          {ref.kind === 'paste' ? 'For all pasted diffs:' : `For all reviews of ${ref.kind === 'local' ? ref.repo : `${ref.owner}/${ref.repo}`}:`}
+        </div>
         {repoRules.length === 0 && <div className="faint">None.</div>}
         {repoRules.map(r => (
           <div className="rule" key={JSON.stringify(r)}>
             <button className="small" onClick={() => removeRule(r)} title="Remove rule">✕</button>{ruleText(r)}
           </div>
         ))}
-        {prRules.length > 0 && <div className="muted" style={{ fontSize: 12 }}>This PR only:</div>}
+        {prRules.length > 0 && <div className="muted" style={{ fontSize: 12 }}>This {ref.kind === 'pr' ? 'PR' : 'review'} only:</div>}
         {prRules.map(r => (
           <div className="rule" key={JSON.stringify(r)}>
             <button className="small" onClick={() => removeRule(r)} title="Remove rule">✕</button>{ruleText(r)}

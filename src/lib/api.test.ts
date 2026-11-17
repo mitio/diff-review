@@ -14,3 +14,15 @@ test('HTTP failures throw ApiError, REST returns pagination link',async()=>{
   vi.stubGlobal('fetch',async()=>Response.json([1],{headers:{link:'next'}}));
   expect(await rest('repos/o/r/pulls/1/files')).toEqual({data:[1],link:'next'});
 });
+
+test('local JSON and text routes send guarded requests and expose server errors', async () => {
+  const {local, localText} = await import('./api');
+  const fetcher = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'PUT' ? Response.json({version:2}) : new Response('diff text'));
+  vi.stubGlobal('fetch', fetcher);
+  expect(await local('state?key=a', {method:'PUT',body:{doc:{}}})).toEqual({version:2});
+  expect(fetcher.mock.calls[0]).toEqual(['/api/state?key=a',{method:'PUT',headers:{'x-ghr':'1','content-type':'application/json'},body:'{"doc":{}}'}]);
+  expect(await localText('paste/a')).toBe('diff text');
+  vi.stubGlobal('fetch', async () => Response.json({message:'Changed'}, {status:409}));
+  await expect(local('state')).rejects.toMatchObject({message:'Changed',status:409});
+  await expect(localText('paste/a')).rejects.toMatchObject({message:'Changed',status:409});
+});

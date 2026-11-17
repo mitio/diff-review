@@ -15,6 +15,25 @@ describe('routes', () => {
     }
   });
 
+  it('round-trips non-PR routes', () => {
+    for (const u of [
+      '/o/r/commit/abc1234',
+      '/o/r/commit/abc1234?tab=overview',
+      '/o/r/compare/main...feature/overview',
+      '/o/r/compare/main...feature/x?tab=overview&q=a',
+      '/local?repo=%2FUsers%2Fme%2Frepo&range=',
+      '/local?repo=%2Fr&range=main...HEAD&tab=overview&only=cat%3Atests',
+      `/paste/${'a'.repeat(64)}?file=x`,
+    ]) {
+      const [p, q] = u.split('?');
+      expect(routeUrl(parseRoute(p, q ? `?${q}` : ''))).toBe(u);
+    }
+    expect(parseRoute('/o/r/compare/main...feature/overview', '').ref).toEqual({ kind: 'compare', owner: 'o', repo: 'r', base: 'main', head: 'feature/overview' });
+    expect(parseRoute('/o/r/commit/abc1234', '?tab=conversation').tab).toBe('diff');
+    expect(parseRoute('/o/r/compare/a..b', '').ref).toBeNull();
+    expect(parseRoute('/local', '?repo=relative').ref).toBeNull();
+  });
+
   it('parses focus and ignores junk', () => {
     expect(parseRoute('/o/r/pull/1', '?only=dir:3:a/b').focus).toEqual({ kind: 'folder', depth: 3, key: 'a/b' });
     expect(parseRoute('/o/r/pull/1', '?only=cat:nope').focus).toBeNull();

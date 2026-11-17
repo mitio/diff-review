@@ -19,7 +19,7 @@ globalThis.localStorage = {
   clear: () => mem.clear(), key: () => null, length: 0,
 } as Storage;
 
-const ref = { owner: 'o', repo: 'r', number: 1 };
+const ref = { kind: 'pr' as const, owner: 'o', repo: 'r', number: 1 };
 const thread = (id: string, path = 'a.ts', commentId = `${id}-c`): Thread => ({
   id, path, line: 1, startLine: null, originalLine: 1, side: 'RIGHT', startSide: null, isResolved: false,
   isOutdated: false, subjectType: 'LINE', viewerCanResolve: true, viewerCanUnresolve: false, viewerCanReply: true,
@@ -242,7 +242,7 @@ test('a new revision on reload overrides a viewed mark that completed during the
   expect(useStore.getState().viewed['a.ts']).toBe('DISMISSED');
 });
 
-const ref2 = { owner: 'o', repo: 'r', number: 2 };
+const ref2 = { kind: 'pr' as const, owner: 'o', repo: 'r', number: 2 };
 const conv = (body: string) => ({ body, bodyHTML: '', createdAt: '', comments: [], reviews: [], truncated: false });
 
 test('a pending review created for one PR is not installed on the next', async () => {
@@ -326,5 +326,5 @@ test("a failed viewed write corrects the recent count of a PR that is no longer 
   await load(ref2);
   write.resolve([{ path: 'a.ts', ok: false }]);
   await vi.advanceTimersByTimeAsync(400);
-  expect(listRecent().find(e => e.number === 1)?.viewed).toBe(0);
+  expect(listRecent().find(e => e.ref.kind === 'pr' && e.ref.number === 1)?.viewed).toBe(0);
 });

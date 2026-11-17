@@ -178,9 +178,12 @@ function joinGaps(segs: Seg[]): Seg[] {
 
 export interface Anchor { side: Side; line: number }
 
-/** Anchor for a gutter click. del/add rows have one side; ctx rows take the side of the gutter that was clicked. */
-export function lineAnchor(row: Row, clicked: Side = 'RIGHT'): Anchor | null {
-  if (row.hunk === undefined) return null;
+/**
+ * Anchor for a gutter click. del/add rows have one side; ctx rows take the side of the gutter that was clicked.
+ * `anyLine`: local reviews can comment outside GitHub's hunks.
+ */
+export function lineAnchor(row: Row, clicked: Side = 'RIGHT', anyLine = false): Anchor | null {
+  if (row.hunk === undefined && !anyLine) return null;
   const side: Side = row.kind === 'del' ? 'LEFT' : row.kind === 'add' ? 'RIGHT' : clicked;
   const line = side === 'LEFT' ? row.oldNo : row.newNo;
   return line === undefined ? null : { side, line };
@@ -196,15 +199,15 @@ export type RangeCheck =
   | { ok: true; startSide: Side; startLine: number; side: Side; line: number; startIdx: number; endIdx: number }
   | { ok: false; reason: string };
 
-/** GitHub accepts a range when both ends are in the same patch hunk; the sides may differ. */
-export function validRange(model: FileModel, a: Anchor, b: Anchor): RangeCheck {
+/** GitHub accepts a range when both ends are in the same patch hunk; the sides may differ. Local reviews take any range. */
+export function validRange(model: FileModel, a: Anchor, b: Anchor, anyLine = false): RangeCheck {
   const ia = anchorIndex(model, a);
   const ib = anchorIndex(model, b);
-  if (ia < 0 || ib < 0) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
+  if (ia < 0 || ib < 0) return { ok: false, reason: anyLine ? 'Select lines of this diff.' : 'Select lines inside the GitHub diff.' };
   const ha = model.rows[ia].hunk;
   const hb = model.rows[ib].hunk;
-  if (ha === undefined || hb === undefined) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
-  if (ha !== hb) return { ok: false, reason: 'GitHub only accepts a range inside one diff hunk.' };
+  if (!anyLine && (ha === undefined || hb === undefined)) return { ok: false, reason: 'Select lines inside the GitHub diff.' };
+  if (!anyLine && ha !== hb) return { ok: false, reason: 'GitHub only accepts a range inside one diff hunk.' };
   const [s, e] = ia <= ib ? [a, b] : [b, a];
   return { ok: true, startSide: s.side, startLine: s.line, side: e.side, line: e.line, startIdx: Math.min(ia, ib), endIdx: Math.max(ia, ib) };
 }

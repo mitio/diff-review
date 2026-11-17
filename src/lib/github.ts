@@ -100,7 +100,7 @@ export async function loadPr(ref: PrRef): Promise<PrData> {
     const viewed = new Map<string,ViewedState>(pr.files.nodes.map((f: Raw) => [f.path,f.viewerViewedState]));
     const counts = new Map<string,Raw>(pr.files.nodes.map((f: Raw) => [f.path,f]));
     const files: PrFile[] = rawFiles.map(f => ({path:f.filename,...(f.previous_filename ? {previousPath:f.previous_filename}:{}),status:f.status,additions:counts.get(f.filename)?.additions ?? f.additions,deletions:counts.get(f.filename)?.deletions ?? f.deletions,...(f.patch !== undefined ? {patch:f.patch}:{}),viewed:viewed.get(f.filename) ?? 'UNVIEWED'}));
-    return {ref,id:pr.id,title:pr.title,url:pr.url,state:pr.state,isDraft:pr.isDraft,author:pr.author ?? null,viewer,baseRefName:pr.baseRefName,headRefName:pr.headRefName,baseOid:pr.baseRefOid,headOid:pr.headRefOid,mergeBaseOid:compare.data.merge_base_commit.sha,additions:pr.additions,deletions:pr.deletions,changedFiles:pr.changedFiles,files,threads:pr.reviewThreads.nodes.map(thread),pendingReviewId:pending(pr,viewer.login)};
+    return {ref:{kind:"pr",...ref},id:pr.id,title:pr.title,url:pr.url,state:pr.state,isDraft:pr.isDraft,author:pr.author ?? null,viewer,baseRefName:pr.baseRefName,headRefName:pr.headRefName,baseOid:pr.baseRefOid,headOid:pr.headRefOid,mergeBaseOid:compare.data.merge_base_commit.sha,additions:pr.additions,deletions:pr.deletions,changedFiles:pr.changedFiles,files,threads:pr.reviewThreads.nodes.map(thread),pendingReviewId:pending(pr,viewer.login)};
   }
 }
 export async function refreshPr(ref: PrRef, known: {baseOid:string;headOid:string}): Promise<RefreshResult> {

@@ -3,7 +3,7 @@ import type { BlobResult, PrData } from '../types';
 let dbP: Promise<IDBDatabase> | null = null;
 function open(): Promise<IDBDatabase> {
   dbP ??= new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('gh-review', 2);
+    const request = indexedDB.open('diff-review', 2);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'key' }).createIndex('timestamp', 'timestamp');

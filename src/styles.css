@@ -340,6 +340,10 @@ table.groups .acts button { margin-left: 2px; }
 .home { max-width: 640px; margin: 12vh auto; padding: 0 16px; display: flex; flex-direction: column; gap: 10px; }
 .home form { display: flex; gap: 6px; }
 .home input { flex: 1; height: 30px; }
+.home .paste { display: flex; flex-direction: column; gap: 6px; }
+.home .paste textarea { font-family: var(--mono); font-size: 12px; }
+.home .paste .row { display: flex; gap: 6px; align-items: center; }
+.home .paste .row .spacer { flex: 1; }
 .home code { font-family: var(--mono); font-size: 12px; background: var(--bg-soft); padding: 6px 8px; border-radius: 6px; display: block; word-break: break-all; }
 .center { padding: 40px; text-align: center; color: var(--fg-muted); }
 .progress { height: 2px; background: var(--accent); position: fixed; top: 0; left: 0; z-index: 70; transition: width .2s; }
