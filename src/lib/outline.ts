@@ -15,7 +15,7 @@ const CONTROL = new Set([
   'when', 'new', 'await', 'yield', 'throw', 'typeof', 'function',
 ]);
 
-function indent(text: string) {
+export function indent(text: string) {
   let n = 0;
   for (const ch of text) {
     if (ch === ' ') n++;

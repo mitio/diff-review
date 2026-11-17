@@ -82,9 +82,10 @@ interface State {
   selAnchor: { path: string; anchor: Anchor } | null;
   /** line range being drag-selected; the composer opens on mouseup */
   dragSel: { path: string; a: Anchor; b: Anchor } | null;
-  /** files shown as an outline, and the outline sections (start rows) expanded in each */
+  /** files shown as an outline (whole file, blocks folded) */
   outline: Dict<boolean>;
-  outlineOpen: Dict<number[]>;
+  /** per file, fold start row -> folded; overrides the outline's default */
+  folds: Dict<Record<number, boolean>>;
   tab: Tab;
   current: string | null;
   /** file to scroll to once it is rendered (from the URL) */
@@ -157,7 +158,7 @@ const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
 export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
-  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, opened: [], tree: null, finder: false, checks: null, conv: null, filter: '', focus: null,
+  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), folds: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, opened: [], tree: null, finder: false, checks: null, conv: null, filter: '', focus: null,
   toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
@@ -353,7 +354,7 @@ export async function load(ref: ReviewRef) {
   set(s => ({
     ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
     pendingReviewId: null, checks: null, tree: null, finder: false, ...(samePr ? {} : { conv: null, current: null, reveal: null, opened: [] }),
-    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(),
+    blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), folds: dict(),
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
   if (!isPr(ref)) return loadOther(ref, seq, key);
@@ -479,7 +480,7 @@ function applyOther(pr: PrData, seq: number, fromCache: boolean) {
   set(s => ({
     pr, loading: false, revalidating: fromCache,
     current: s.current ?? pr.files[0]?.path ?? null,
-    ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
+    ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), folds: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
   }));
   syncLocal();
   if (typeof document !== 'undefined') document.title = `${pr.title} · diff-review`;
@@ -576,7 +577,7 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
       pr, loading: false, revalidating: fromCache, viewed, threads, threadsByPath: byPath(threads),
       pendingReviewId: keepLocal ? s.pendingReviewId : pr.pendingReviewId,
       current: s.current ?? pr.files[0]?.path ?? null,
-      ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
+      ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), folds: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
     };
   });
   if (typeof document !== 'undefined' && isPr(pr.ref)) document.title = `${pr.title} · #${pr.ref.number}`;
@@ -946,16 +947,28 @@ export function setCollapsed(path: string, collapsed: boolean) {
 }
 
 export function toggleOutline(path: string) {
-  set(s => ({ outline: put(s.outline, path, !s.outline[path]), collapsed: put(s.collapsed, path, false) }));
+  setOutline([path], !get().outline[path]);
 }
 
-export function setOutlineOpen(path: string, starts: number[]) {
-  set(s => ({ outlineOpen: put(s.outlineOpen, path, starts) }));
+/** Switching the outline starts from its default folds. */
+export function setOutline(paths: string[], on: boolean) {
+  set(s => {
+    const outline = dict(s.outline), folds = dict(s.folds), collapsed = dict(s.collapsed);
+    for (const p of paths) {
+      outline[p] = on;
+      delete folds[p];
+      if (on) collapsed[p] = false;
+    }
+    return { outline, folds, collapsed };
+  });
 }
 
-export function toggleOutlineSection(path: string, start: number) {
-  const open = get().outlineOpen[path] ?? [];
-  setOutlineOpen(path, open.includes(start) ? open.filter(x => x !== start) : [...open, start]);
+export function setFolds(path: string, patch: Record<number, boolean>) {
+  set(s => ({ folds: put(s.folds, path, { ...s.folds[path], ...patch }) }));
+}
+
+export function resetFolds(path: string) {
+  set(s => ({ folds: drop(s.folds, path) }));
 }
 
 export function expand(path: string, from: number, to: number) {

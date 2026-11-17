@@ -4,8 +4,8 @@ import { buildModel, lineAnchor, parsePatch, splitPairs, validRange, view, wordD
 import { anchorStatus, locateThread, quoteRows } from '../lib/anchor.ts';
 import { ghRepo } from '../lib/refs.ts';
 import {
-  ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
-  setLocalOutdated, setOutlineOpen, toast, toggleFileHidden, toggleOutline, toggleOutlineSection, useStore, type ComposerTarget,
+  ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, resetFolds,
+  setCollapsed, setFolds, setLocalOutdated, toast, toggleFileHidden, toggleOutline, useStore, type ComposerTarget,
 } from './store.ts';
 import { Lazy } from './Lazy.tsx';
 import { NewComment, ThreadView } from './Thread.tsx';
@@ -13,6 +13,7 @@ import { StatusLetter } from './bits.tsx';
 import { requestHighlight, useHighlight, type RowToks } from './hl.ts';
 import { languageOf, type Tok } from '../lib/languages.ts';
 import { outline } from '../lib/outline.ts';
+import { foldRanges, type Fold } from '../lib/folds.ts';
 
 const EMPTY: never[] = [];
 const CHUNK = 400;
@@ -86,8 +87,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   let body: ReactNode = null;
   if (!collapsed) {
     if (model && (changed <= BIG || forceBig)) {
-      const Body = outlined ? OutlineBody : DiffBody;
-      body = <Body file={file} model={model} threads={lineThreads} composer={composer} hlReady={blob !== 'loading'} />;
+      body = <DiffBody file={file} model={model} threads={lineThreads} composer={composer} hlReady={blob !== 'loading'} outlined={outlined} />;
     } else if (model) {
       body = (
         <div className="fnote">
@@ -140,7 +140,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         {hidden && <span className="chip">hidden</span>}
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
         {blob === 'loading' && !collapsed && <span className="faint" title="loading full file for context">…</span>}
-        <button className={`small${outlined ? ' on' : ''}`} title="Show only the file's structure (z)" onClick={() => toggleOutline(path)}>
+        <button className={`small${outlined ? ' on' : ''}`} title="Whole file with its blocks folded (z; all files: Z)" onClick={() => toggleOutline(path)}>
           Outline
         </button>
         {(!unchanged || localReview) && (
@@ -180,21 +180,52 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
 });
 
 interface BodyProps {
-  file: PrFile; model: FileModel; threads: Thread[]; composer: ComposerTarget | undefined; hlReady: boolean;
+  file: PrFile; model: FileModel; threads: Thread[]; composer: ComposerTarget | undefined; hlReady: boolean; outlined: boolean;
 }
 
-/** `range`: render only rows [from, to], all of them (an expanded outline section). */
-function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps & { range?: [number, number] }) {
+const NO_FOLDS: Record<number, boolean> = {};
+/** an outline leaves shorter blocks open */
+const OUTLINE_MIN = 3;
+
+/** Foldable blocks; in an outline, which are folded by default (those not holding other outline sections). */
+function useFolds(model: FileModel, path: string, toks: RowToks | undefined, outlined: boolean) {
+  const lang = languageOf(path);
+  const folds = useMemo(() => {
+    if (!model.complete) return [] as Fold[];
+    return foldRanges(model.rows, lang, toks && (i => inStringOrComment(model.rows[i], toks, i)));
+  }, [model, lang, toks]);
+  const containers = useMemo(() => {
+    const set = new Set<number>();
+    if (!outlined) return set;
+    const starts = outline(model.rows, lang, toks && (i => inStringOrComment(model.rows[i], toks, i))).filter(e => !e.top).map(e => e.idx);
+    for (const f of folds) {
+      let lo = 0, hi = starts.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (starts[mid] <= f.start) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo < starts.length && starts[lo] <= f.end) set.add(f.start);
+    }
+    return set;
+  }, [folds, outlined, model, lang, toks]);
+  const overrides = useStore(s => s.folds[path]) ?? NO_FOLDS;
+  const isFolded = useMemo(() => (f: Fold) => overrides[f.start] ?? (outlined && f.end - f.start >= OUTLINE_MIN && !containers.has(f.start)), [overrides, outlined, containers]);
+  return { folds, isFolded };
+}
+
+function DiffBody({ file, model, threads, composer, hlReady, outlined }: BodyProps) {
   const path = file.path;
   const hlOn = useStore(s => s.settings.highlight) && hlReady;
   const toks = useHighlight(model, path, hlOn);
+  const { folds, isFolded } = useFolds(model, path, toks, outlined);
   const unchanged = isUnchanged(file);
   // a file outside the diff shows whole, in one column
   const viewMode = useStore(s => (unchanged ? 'unified' : s.settings.viewMode));
   const anyLine = useStore(s => isLocalReview(s));
   const ctxSetting = useStore(s => s.settings.context);
   const stored = useStore(s => s.expansions[path]) ?? EMPTY;
-  const context = ctxSetting >= ALL || unchanged ? Infinity : ctxSetting;
+  const context = ctxSetting >= ALL || unchanged || outlined ? Infinity : ctxSetting;
 
   const byRow = useMemo(() => {
     const m = new Map<number, Thread[]>();
@@ -218,13 +249,34 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   }, [drag, composer, model, anyLine]);
   const sel = lineComposer?.ok ? lineComposer : null;
 
-  const items = useMemo(() => {
-    if (range) return Array.from({ length: range[1] - range[0] + 1 }, (_, k): Item => ({ kind: 'row', idx: range[0] + k }));
+  const base = useMemo(() => {
     const exp: Array<[number, number]> = [...stored];
     for (const i of byRow.m.keys()) exp.push([i, i]);
     if (sel) exp.push([sel.startIdx, sel.endIdx]);
     return view(model, context, exp);
-  }, [model, context, stored, byRow, sel, range?.[0], range?.[1]]);
+  }, [model, context, stored, byRow, sel]);
+
+  /** folded blocks whose opener shows; a block holding the comment being written stays open */
+  const folded = useMemo(() => {
+    const shown = new Uint8Array(model.rows.length);
+    for (const it of base) if (it.kind === 'row') shown[it.idx] = 1;
+    const out = new Map<number, Fold>();
+    let hiddenTo = -1;
+    for (const f of folds) {
+      if (!shown[f.start] || f.start <= hiddenTo || !isFolded(f)) continue;
+      if (sel && sel.endIdx > f.start && sel.startIdx <= f.end) continue;
+      out.set(f.start, f);
+      hiddenTo = f.end;
+    }
+    return out;
+  }, [base, folds, isFolded, sel, model]);
+
+  const items = useMemo(() => {
+    if (!folded.size) return base;
+    const hidden = new Uint8Array(model.rows.length);
+    for (const f of folded.values()) hidden.fill(1, f.start + 1, f.end + 1);
+    return base.filter(it => (it.kind === 'row' ? !hidden[it.idx] : !(it.from >= 0 && hidden[it.from] && hidden[it.to])));
+  }, [base, folded, model]);
 
   const pairs = useMemo(() => splitPairs(items, model.rows), [items, model]);
   const partner = useMemo(() => {
@@ -242,73 +294,48 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
+  const foldAt = useMemo(() => new Map(folds.map(f => [f.start, f])), [folds]);
   const ctx: RowCtx = {
     file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn, anyLine,
-    readOnly: unchanged && !anyLine,
+    readOnly: unchanged && !anyLine, foldAt, folded,
   };
 
   return (
     <>
-      {!range && lineComposer && !lineComposer.ok && (
+      {outlined && <OutlineBar path={path} folds={folds} complete={model.complete} />}
+      {lineComposer && !lineComposer.ok && (
         <div className="file-threads">
           <div className="fnote">{lineComposer.reason}</div>
         </div>
       )}
-      {!range && byRow.orphans.length > 0 && (
+      {byRow.orphans.length > 0 && (
         <div className="file-threads">
           {byRow.orphans.map(t => <ThreadView key={t.id} thread={t} showLocation />)}
         </div>
       )}
       {chunks.map((c, i) => (
-        <Lazy key={i} estimate={c.length * 18} eager={!!range || (i === 0 && list.length < 200)}>
+        <Lazy key={i} estimate={c.length * 18} eager={i === 0 && list.length < 200}>
           {() => <Chunk items={c} ctx={ctx} />}
         </Lazy>
       ))}
-      {!range && list.length === 0 && <div className="fnote">No changes to show.</div>}
+      {list.length === 0 && <div className="fnote">No changes to show.</div>}
     </>
   );
 }
 
-function OutlineBody(props: BodyProps) {
-  const { file, model, threads, hlReady } = props;
-  const path = file.path;
-  const toks = useHighlight(model, path, useStore(s => s.settings.highlight) && hlReady);
-  const entries = useMemo(() => outline(model.rows, languageOf(path), toks && (i => inStringOrComment(model.rows[i], toks, i))), [model, path, toks]);
-  const open = useStore(s => s.outlineOpen[path]) ?? EMPTY;
-  const threadRows = useMemo(() => threads.map(t => rowOf(model, t)).filter(i => i >= 0), [threads, model]);
-  const changed = entries.filter(e => e.add + e.del > 0);
+function OutlineBar({ path, folds, complete }: { path: string; folds: Fold[]; complete: boolean }) {
+  const changed = folds.filter(f => f.add + f.del > 0);
   return (
-    <>
-      <div className="outline-bar">
-        <span>{entries.length} sections, {changed.length} changed</span>
-        <button className="link" onClick={() => setOutlineOpen(path, changed.map(e => e.idx))}>expand changed</button>
-        <button className="link" onClick={() => setOutlineOpen(path, [])}>collapse all</button>
-        {!model.complete && <span className="faint">only the changed hunks are loaded, so this outline is partial</span>}
-      </div>
-      {entries.map(e => {
-        const row = model.rows[e.idx];
-        const isOpen = open.includes(e.idx);
-        const from = row.kind === 'ctx' && !e.top ? e.idx + 1 : e.idx;
-        const nThreads = threadRows.filter(i => i >= e.idx && i <= e.end).length;
-        let rowToks = (row.kind === 'del' ? toks?.a : toks?.b)?.[e.idx] ?? null;
-        if (rowToks && rowToks.reduce((n, t) => n + t[0], 0) !== row.text.length) rowToks = null;
-        return (
-          <div key={e.idx}>
-            <div className={`oline ${row.kind}${e.add + e.del ? '' : ' quiet'}`} onClick={() => toggleOutlineSection(path, e.idx)}>
-              <span className="caret">{isOpen ? '▾' : '▸'}</span>
-              <span className="onum">{e.top ? '' : row.newNo ?? row.oldNo}</span>
-              <span className="ocode">
-                {e.top ? <i className="faint">top of file</i> : renderLine(row.text, rowToks, null, 'ins')}
-              </span>
-              {nThreads > 0 && <span className="chip" title="threads">💬 {nThreads}</span>}
-              {e.add > 0 && <span className="add mono">+{e.add}</span>}
-              {e.del > 0 && <span className="del mono">−{e.del}</span>}
-            </div>
-            {isOpen && from <= e.end && <DiffBody {...props} range={[from, e.end]} />}
-          </div>
-        );
-      })}
-    </>
+    <div className="outline-bar">
+      <span>Outline</span>
+      {complete ? (
+        <>
+          <button className="link" onClick={() => setFolds(path, Object.fromEntries(changed.map(f => [f.start, false])))}>unfold changed</button>
+          <button className="link" onClick={() => setFolds(path, Object.fromEntries(folds.map(f => [f.start, false])))}>unfold all</button>
+          <button className="link" onClick={() => resetFolds(path)}>reset</button>
+        </>
+      ) : <span className="faint">only the changed hunks are loaded, so nothing folds</span>}
+    </div>
   );
 }
 
@@ -336,6 +363,9 @@ interface RowCtx {
   anyLine: boolean;
   /** a PR file outside the diff: GitHub takes no comments there */
   readOnly: boolean;
+  /** foldable blocks by opener row, and the folded ones */
+  foldAt: Map<number, Fold>;
+  folded: Map<number, Fold>;
 }
 
 function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) {
@@ -369,7 +399,12 @@ function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) 
 
 function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
   for (const idx of ids) {
-    const ts = ctx.byRow.get(idx);
+    const f = ctx.folded.get(idx);
+    let ts = ctx.byRow.get(idx);
+    if (f) {
+      // threads on folded lines show under the block's first line
+      for (const [i, more] of ctx.byRow) if (i > f.start && i <= f.end) ts = [...(ts ?? []), ...more];
+    }
     const isComposer = ctx.composer && !ctx.dragging && ctx.composer.endIdx === idx;
     if (!ts && !isComposer) continue;
     out.push(
@@ -383,6 +418,38 @@ function pushExtras(out: ReactNode[], ids: number[], ctx: RowCtx) {
       </tr>,
     );
   }
+}
+
+function FoldCaret({ idx, ctx }: { idx: number; ctx: RowCtx }) {
+  const f = ctx.foldAt.get(idx);
+  if (!f) return null;
+  const on = ctx.folded.has(idx);
+  return (
+    <span
+      className={`fold${on ? ' on' : ''}`}
+      title={on ? 'Unfold' : 'Fold'}
+      onMouseDown={e => {
+        e.preventDefault();
+        e.stopPropagation();
+        setFolds(ctx.file.path, { [idx]: !on });
+      }}
+    >
+      {on ? '▸' : '▾'}
+    </span>
+  );
+}
+
+function FoldChip({ idx, ctx }: { idx: number; ctx: RowCtx }) {
+  const f = ctx.folded.get(idx);
+  if (!f) return null;
+  const n = f.end - f.start;
+  return (
+    <button className="foldchip" onClick={() => setFolds(ctx.file.path, { [idx]: false })} title="Unfold">
+      ⋯ {n} line{n === 1 ? '' : 's'}
+      {f.add > 0 && <span className="add"> +{f.add}</span>}
+      {f.del > 0 && <span className="del"> −{f.del}</span>}
+    </button>
+  );
 }
 
 function LineComposer({ path, r, model }: { path: string; r: Extract<RangeCheck, { ok: true }>; model: FileModel }) {
@@ -482,6 +549,7 @@ function Code({ row, idx, ctx, pane }: { row: Row; idx: number; ctx: RowCtx; pan
     <>
       {content}
       {row.cr && <span className="faint" title="CRLF line ending">␍</span>}
+      {(!pane || (pane === 'right') === (row.kind !== 'del')) && <FoldChip idx={idx} ctx={ctx} />}
     </>
   );
 }
@@ -496,7 +564,7 @@ const UnifiedRow = memo(function UnifiedRow({ idx, ctx }: { idx: number; ctx: Ro
     <tr className={`${row.kind}${inSel(ctx, idx) ? ' sel' : ''}${row.noEol ? ' noeol' : ''}`}>
       <td className={`num${nc}`} data-idx={idx} data-side={whole ? 'RIGHT' : 'LEFT'} onMouseDown={e => onNumDown(e, idx, ctx, 'LEFT')}>{whole ? '' : row.oldNo ?? ''}</td>
       <td className={`num${nc}`} data-idx={idx} data-side="RIGHT" onMouseDown={e => onNumDown(e, idx, ctx, 'RIGHT')}>{row.newNo ?? ''}</td>
-      <td className="sign" data-idx={idx}>{SIGN[row.kind]}</td>
+      <td className="sign" data-idx={idx}><FoldCaret idx={idx} ctx={ctx} />{SIGN[row.kind]}</td>
       <td className="code" data-idx={idx}><Code row={row} idx={idx} ctx={ctx} /></td>
     </tr>
   );
@@ -513,7 +581,10 @@ const SplitRow = memo(function SplitRow({ left, right, ctx }: { left: number | n
     const noeol = row.noEol && (row.kind !== 'ctx' || isRight) ? ' noeol-c' : '';
     const side = isRight ? 'RIGHT' : 'LEFT';
     return [
-      <td key="n" className={`num ${k}${nc}`} data-idx={idx} data-side={side} onMouseDown={e => onNumDown(e, idx, ctx, side)}>{no ?? ''}</td>,
+      <td key="n" className={`num ${k}${nc}`} data-idx={idx} data-side={side} onMouseDown={e => onNumDown(e, idx, ctx, side)}>
+        {no ?? ''}
+        {isRight === (row.kind !== 'del') && <FoldCaret idx={idx} ctx={ctx} />}
+      </td>,
       <td key="c" className={`code ${k}${noeol}`} data-idx={idx} data-side={side}><Code row={row} idx={idx} ctx={ctx} pane={isRight ? 'right' : 'left'} /></td>,
     ];
   };

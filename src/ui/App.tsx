@@ -5,7 +5,7 @@ import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent
 import { appPath, githubUrl, isPr, parseReviewInput, prRef, refKey } from '../lib/refs.ts';
 import { contentOid, createPaste } from '../lib/sources.ts';
 import {
-  ALL, composing, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
+  ALL, composing, setOutline, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
   openCount, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
@@ -444,7 +444,7 @@ const KEYS: Array<[string, string]> = [
   ['j / k', 'next / previous file'],
   ['v', 'toggle viewed, jump to next unviewed'],
   ['x', 'collapse / expand current file'],
-  ['z', 'outline of current file'],
+  ['z / Z', 'outline on / off: current file / all files'],
   ['s', 'toggle unified / split'],
   ['[ / ]', 'less / more context'],
   ['- / =', 'smaller / larger font'],
@@ -491,6 +491,12 @@ function useKeys() {
         case 'k': stepFile(-1); break;
         case 'v': toggleViewedCurrent(); break;
         case 'z': if (s.current) { useStore.setState({ tab: 'diff' }); toggleOutline(s.current); } break;
+        case 'Z': {
+          const paths = streamFiles(s).map(f => f.path);
+          useStore.setState({ tab: 'diff' });
+          setOutline(paths, !paths.every(p => s.outline[p]));
+          break;
+        }
         case 'x': if (s.current) setCollapsed(s.current, !(s.collapsed[s.current] ?? isViewed(s.viewed[s.current]))); break;
         case 's': updateSettings({ viewMode: st.viewMode === 'split' ? 'unified' : 'split' }); break;
         case '[': updateSettings({ context: CONTEXTS[Math.max(0, (i < 0 ? 3 : i) - 1)] }); break;
