@@ -157,3 +157,22 @@ test('a new review is not saved until something is written, then carries the tit
   expect(calls.map(c => c.method)).toEqual(['GET', 'PUT']);
   expect(calls[1].body.doc.title).toBe('Pasted diff');
 });
+
+test('reload only moves forward and never while writes are pending', async () => {
+  let stored: any = {key: 'paste:' + 'b'.repeat(64), ref: {kind: 'paste', id: 'b'.repeat(64)}, title: 't', version: 2, updatedAt: '', viewed: {}, threads: []};
+  globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === 'PUT') { stored = {...JSON.parse(String(init.body)).doc, version: stored.version + 1}; return new Response(JSON.stringify({version: stored.version}), {status: 200}); }
+    return new Response(JSON.stringify(stored), {status: 200});
+  }) as typeof fetch;
+  const review = await LocalReview.open({kind: 'paste', id: 'b'.repeat(64)}, '');
+  expect(await review.reload()).toBe(false);
+  stored = {...stored, version: 1, title: 'older'};
+  expect(await review.reload()).toBe(false);
+  expect(review.doc().title).toBe('t');
+  stored = {...stored, version: 5, title: 'newer'};
+  void review.setViewed([{path: 'x', fingerprint: 'f'}]);
+  expect(await review.reload()).toBe(false);
+  await vi.advanceTimersByTimeAsync(400);
+  await review.flush();
+  expect(review.doc().version).toBe(6);
+});

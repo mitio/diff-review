@@ -98,8 +98,8 @@ export function parseReviewInput(s: string): ReviewRef | null {
     if (u.origin !== 'https://github.com' && !app) return null;
     path = u.pathname; search = app ? u.search : '';
   } else if (!path.startsWith('/')) path = `/${path}`;
-  // GitHub links often carry a sub-page (`/pull/1/files`) or a trailing fragment
-  return parseAppPath(path.replace(/\/(files|commits|checks)\/?$/, ''), search)?.ref ?? null;
+  // PR sub-pages (`/pull/1/files`) are accepted by parseAppPath; a compare ref may itself end in `/files`
+  return parseAppPath(path, search)?.ref ?? null;
 }
 
 /** Where a review lives on GitHub, if anywhere. */

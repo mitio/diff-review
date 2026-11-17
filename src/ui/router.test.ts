@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseRoute, routeUrl } from './router.ts';
+import { parseReviewInput } from '../lib/refs.ts';
 
 describe('routes', () => {
   it('round-trips PR routes', () => {
@@ -31,6 +32,8 @@ describe('routes', () => {
     expect(parseRoute('/o/r/compare/main...feature/overview', '').ref).toEqual({ kind: 'compare', owner: 'o', repo: 'r', base: 'main', head: 'feature/overview' });
     expect(parseRoute('/o/r/commit/abc1234', '?tab=conversation').tab).toBe('diff');
     expect(parseRoute('/o/r/compare/a..b', '').ref).toBeNull();
+    expect(parseReviewInput('https://github.com/o/r/compare/main...feature/files')).toEqual({ kind: 'compare', owner: 'o', repo: 'r', base: 'main', head: 'feature/files' });
+    expect(parseReviewInput('https://github.com/o/r/pull/3/files')).toEqual({ kind: 'pr', owner: 'o', repo: 'r', number: 3 });
     expect(parseRoute('/local', '?repo=relative').ref).toBeNull();
   });
 

@@ -627,3 +627,18 @@ Partly accepted: 8 `core.fsmonitor=false` added; clean filters still run (disabl
 boundary is documented as "same as running `git diff` there". 11 not fixed (known limit): with CRLF checkouts or
 normalising attributes, the disk snapshot can disagree with git's normalised patch; `buildModel` then refuses the
 blob and the file stays on the patch view (correct, just without context expansion).
+
+### v3 code-review outcomes (gpt-6.1-sol @ xhigh)
+
+Pass 1, 7 findings:
+1. Leaving a review and returning created a second `LocalReview` (two writers, one 409s and drops a comment). The store
+   now keeps one instance per review for the page's lifetime.
+2. The worktree snapshot was read after the diff, so a later edit could render as unchanged context. The snapshot is now
+   taken between two identical diffs (up to 3 tries; still changing → no snapshot, patch view only).
+3. A refresh's state GET racing a save could install the older doc. `LocalReview.reload()` only moves forward and never
+   while writes are pending.
+4. `/files`, `/commits`, `/checks` were stripped from compare refs on input; only PR URLs accept them now.
+5. Not fixed (known limit): GitHub's REST file list has no modes, so a mode flip that reverses while a compare's refs
+   move keeps the same fingerprint.
+6. Untracked files over 5 MB had no content identity; their placeholder now carries `git hash-object`'s oid.
+7. `diff.mnemonicPrefix` / `diff.noprefix` / `diff.relative` changed paths; diffs force `a/`/`b/` and `--no-relative`.

@@ -371,6 +371,21 @@ export async function load(ref: ReviewRef) {
 // ---------- local reviews (commits, compares, local and pasted diffs) ----------
 
 let local: LocalReview | null = null;
+/** One instance (one writer) per review for the page's lifetime, so leaving and reopening can't fork its writes. */
+const localReviews = new Map<string, Promise<LocalReview>>();
+function openLocal(ref: ReviewRef): Promise<LocalReview> {
+  const key = refKey(ref);
+  let p = localReviews.get(key);
+  if (!p) {
+    p = LocalReview.open(ref, '');
+    localReviews.set(key, p);
+    p.catch(() => { if (localReviews.get(key) === p) localReviews.delete(key); });
+  } else {
+    // a revisit: pick up what other tabs wrote meanwhile
+    void p.then(lr => lr.reload()).then(changed => { if (changed) syncLocal(); }).catch(() => {});
+  }
+  return p;
+}
 let unsubLocal: (() => void) | null = null;
 function detachLocal() {
   unsubLocal?.();
@@ -398,7 +413,7 @@ function syncLocal() {
 async function loadOther(ref: ReviewRef, seq: number, key: string) {
   const freshP = loadSource(ref);
   freshP.catch(() => {});
-  const docP = LocalReview.open(ref, '');
+  const docP = openLocal(ref);
   docP.catch(() => {});
   const cached = await getPr(key);
   if (seq !== loadSeq) return;
@@ -442,14 +457,9 @@ async function refreshOther(manual: boolean) {
   const gen = dataGen;
   const pr = await loadSource(ref);
   if (ls !== loadSeq || gen !== dataGen) return;
-  // pick up comments written elsewhere (another tab, the CLI) once nothing is pending here
-  if (local) {
-    const lr = local;
-    await lr.flush();
-    const fresh = await LocalReview.open(ref, pr.title);
-    if (ls !== loadSeq || local !== lr) return;
-    if (fresh.doc().version !== lr.doc().version) attachLocal(fresh);
-  }
+  // pick up comments written in another tab
+  await local?.reload().catch(() => false);
+  if (ls !== loadSeq) return;
   applyOther(pr, ls, false);
   void putPr(refKey(ref), pr);
   if (manual) toast('Refreshed');

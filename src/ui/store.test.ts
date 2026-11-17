@@ -9,6 +9,22 @@ const gh = vi.hoisted(() => ({
 }));
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
+const lr = vi.hoisted(() => ({ opens: 0, adds: 0, loadSource: vi.fn() }));
+vi.mock('../lib/sources.ts', () => ({ loadSource: lr.loadSource, fetchLocalBlobs: async () => new Map() }));
+vi.mock('../lib/localstate.ts', () => ({
+  LocalReview: class {
+    key: string;
+    constructor(key: string) { this.key = key; }
+    static async open(ref: { repo: string; range: string }) { lr.opens++; return new this(`local:${ref.repo}:${ref.range}`); }
+    doc() { return { threads: [], viewed: {} }; }
+    onReplace() { return () => {}; }
+    setTitle() {}
+    async reload() { return false; }
+    async addThread() { lr.adds++; return {}; }
+  },
+  toThreads: () => [],
+  viewedStates: () => ({}),
+}));
 
 import { listRecent } from '../lib/recent.ts';
 import { createThread, load, markViewed, postComment, refresh, removeComment, useStore } from './store.ts';
@@ -327,4 +343,19 @@ test("a failed viewed write corrects the recent count of a PR that is no longer 
   write.resolve([{ path: 'a.ts', ok: false }]);
   await vi.advanceTimersByTimeAsync(400);
   expect(listRecent().find(e => e.ref.kind === 'pr' && e.ref.number === 1)?.viewed).toBe(0);
+});
+
+test('leaving a local review and coming back keeps one writer for it', async () => {
+  const localRef = { kind: 'local' as const, repo: '/r', range: '' };
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r:' }));
+  lr.opens = 0;
+  await load(localRef);
+  await flush();
+  expect(await createThread({ path: 'a.ts', body: 'x', subjectType: 'FILE' })).toBe(true);
+  await loaded(pr({ ref: ref2, id: 'PR2' }));
+  await load(localRef);
+  await flush();
+  expect(await createThread({ path: 'a.ts', body: 'y', subjectType: 'FILE' })).toBe(true);
+  expect(lr.opens).toBe(1);
+  expect(lr.adds).toBe(2);
 });

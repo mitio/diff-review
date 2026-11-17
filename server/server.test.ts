@@ -380,3 +380,25 @@ it('returns missing for unknown worktree identifiers', async () => {
     expect(JSON.parse(response.body)['worktree:unknown:a']).toEqual({ text: null, binary: false, truncated: false, missing: true });
   } finally { await rm(repo, { recursive: true, force: true }); }
 });
+it('ignores prefix config and gives large untracked files a content identity', async () => {
+  const { repo, git } = await gitRepo();
+  try {
+    const get = await start();
+    const diff = async () => JSON.parse((await get(`/api/local/diff?${new URLSearchParams({ repo, range: '' })}`, { headers: api })).body);
+    await writeFile(join(repo, 'x'), 'one\n'); await git('add', '.'); await git('commit', '-m', 'x');
+    await git('config', 'diff.mnemonicPrefix', 'true');
+    await git('config', 'diff.noprefix', 'true');
+    await writeFile(join(repo, 'x'), 'two\n');
+    const big = join(repo, 'big.bin');
+    await writeFile(big, Buffer.alloc(6 * 1024 * 1024, 1));
+    const first = await diff();
+    expect(first.diff).toContain('diff --git a/x b/x');
+    expect(first.diff).toContain('+++ b/x');
+    const blobs = JSON.parse((await get('/api/local/blobs', { method: 'POST', headers: api, body: JSON.stringify({ repo, specs: [{ commit: first.headOid, path: 'x' }] }) })).body);
+    expect(blobs[`${first.headOid}:x`].text).toBe('two\n');
+    await writeFile(big, Buffer.alloc(6 * 1024 * 1024, 2));
+    const second = await diff();
+    expect(second.headOid).not.toBe(first.headOid);
+    expect(second.diff).toMatch(/^index 0{40}\.\.[0-9a-f]{40}$/m);
+  } finally { await rm(repo, { recursive: true, force: true }); }
+});

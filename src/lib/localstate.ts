@@ -147,6 +147,24 @@ export class LocalReview {
     void this.enqueue(doc => { doc.title = title; }).catch(() => {});
   }
 
+  /**
+   * Picks up writes made elsewhere (another tab). Only when nothing is pending here, and only forward: a GET that
+   * raced a save of ours must not install the older version. True if the doc changed.
+   */
+  async reload(): Promise<boolean> {
+    const busy = () => this.writing || !!this.recovering || this.pending.length > 0 || this.flight.length > 0;
+    if (busy()) return false;
+    let doc: ReviewDoc;
+    try { doc = await local<ReviewDoc>(statePath(this.key)); }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 404) return false;
+      throw error;
+    }
+    if (busy() || doc.version <= this.acknowledged.version) return false;
+    this.acknowledged = doc;
+    return true;
+  }
+
   flush(): Promise<void> {
     if (!this.writing && !this.pending.length && !this.recovering) return Promise.resolve();
     const promise = new Promise<void>((resolve, reject) => { this.waiters.push({resolve,reject}); });

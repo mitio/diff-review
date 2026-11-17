@@ -157,11 +157,14 @@ export function createApp(opts: {
         left = EMPTY_TREE;
       }
     }
-    let diff = (await git(root, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--full-index', left, ...(right ? [right] : []), '--'])).toString();
-    const targets = new Set<string>();
-    if (!right) {
+    // fixed prefixes: diff.noprefix / diff.mnemonicPrefix / diff.relative in the repo's config would change the paths
+    const DIFF = ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '--no-relative'];
+    const build = async () => {
+      let diff = (await git(root, [...DIFF, '--find-renames', '--full-index', left, ...(right ? [right] : []), '--'])).toString();
+      const targets = new Set<string>();
+      if (right) return { diff, targets };
       const tracked = new Set<string>();
-      const names = (await git(root, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--find-renames', '--name-status', '-z', left, '--'])).toString().split('\0');
+      const names = (await git(root, [...DIFF, '--find-renames', '--name-status', '-z', left, '--'])).toString().split('\0');
       for (let i = 0; i < names.length - 1;) {
         const status = names[i++], old = names[i++];
         tracked.add(old);
@@ -177,27 +180,42 @@ export function createApp(opts: {
         const a = `a/${path}`, b = `b/${path}`;
         const quoted = (p: string) => /["\\\n\r\t]/.test(p) ? JSON.stringify(p) : p;
         if (info.size > 5 * MB) {
-          diff += `diff --git ${quoted(a)} ${quoted(b)}\nnew file mode 100644\nBinary files /dev/null and ${quoted(b)} differ\n`;
+          // the content's oid makes a replaced large file a different change
+          const oid = (await git(root, ['hash-object', '--', path])).toString().trim();
+          diff += `diff --git ${quoted(a)} ${quoted(b)}\nnew file mode 100644\nindex ${'0'.repeat(40)}..${oid}\nBinary files /dev/null and ${quoted(b)} differ\n`;
         } else {
-          let added = (await git(root, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-index', '--', '/dev/null', path], true)).toString();
+          let added = (await git(root, [...DIFF, '--full-index', '--no-index', '--', '/dev/null', path], true)).toString();
           const newline = added.indexOf('\n');
           added = `diff --git ${quoted(a)} ${quoted(b)}` + added.slice(newline);
           diff += added;
         }
       }
-    }
-    const headOid = right ?? `worktree:${hash(diff).slice(0, 16)}`;
+      return { diff, targets };
+    };
+    let { diff, targets } = await build();
     if (!right) {
-      const snapshot = new Map<string, BlobResult>();
-      let bytes = 0;
-      for (const path of targets) {
-        const entry = await diskBlob(root, path, 64 * MB - bytes);
-        bytes += entry.bytes; snapshot.set(path, entry.result);
+      // The snapshot must show the same content the diff was made from: take it between two identical diffs.
+      let snapshot = new Map<string, BlobResult>();
+      for (let attempt = 0; ; attempt++) {
+        snapshot = new Map();
+        let bytes = 0;
+        for (const path of targets) {
+          const entry = await diskBlob(root, path, 64 * MB - bytes);
+          bytes += entry.bytes; snapshot.set(path, entry.result);
+        }
+        const again = await build();
+        if (again.diff === diff) break;
+        diff = again.diff; targets = again.targets;
+        // still changing (an agent is writing): no contents, so the files stay on the patch view
+        if (attempt === 2) { snapshot = new Map(); break; }
       }
+      const headOid = `worktree:${hash(diff).slice(0, 16)}`;
       const key = `${root}\0${headOid}`;
       snapshots.delete(key); snapshots.set(key, snapshot);
       while (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value!);
+      return { root, range, baseOid: left, headOid, mergeBaseOid: left, title, author, diff };
     }
+    const headOid = right;
     return { root, range, baseOid: left, headOid, mergeBaseOid: left, title, author, diff };
   }
   async function localRoutes(req: http.IncomingMessage, res: http.ServerResponse, rawPath: string): Promise<boolean> {
