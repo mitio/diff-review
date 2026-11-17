@@ -393,3 +393,237 @@ Pass 4, 2 findings:
    `DISMISSED`, the rollback restores the older revision's `VIEWED`. Recording server state for in-flight paths would
    break the "nothing to send if GitHub already has it" check. The next refresh or reopen corrects it.
 2. Home could read the recent list before a queued correction was written; Home now flushes the queue on mount.
+
+## v3 (2026-11-17): commits, compares, local diffs, pasted diffs, CLI; rename to diff-review
+
+**Why:** review things that are not PRs, mostly an agent's local work, and hand the comments back to an agent as
+Markdown. For non-PR sources nothing is written to GitHub; comments and viewed state live on this machine.
+
+### Sources and URLs
+
+```ts
+export type ReviewRef =
+  | { kind: 'pr'; owner: string; repo: string; number: number }
+  | { kind: 'commit'; owner: string; repo: string; sha: string }            // sha as typed (7–40 hex)
+  | { kind: 'compare'; owner: string; repo: string; base: string; head: string } // refs or shas as typed
+  | { kind: 'local'; repo: string; range: string }   // repo = absolute git toplevel; range '' = uncommitted
+  | { kind: 'paste'; id: string };                   // sha256 hex of the diff text
+```
+
+| kind | URL | key (`refKey`) |
+|---|---|---|
+| pr | `/o/r/pull/N[/overview\|/conversation]` | `o/r#N` (unchanged, so existing localStorage keys stay valid) |
+| commit | `/o/r/commit/<sha>` | `o/r@<sha>` |
+| compare | `/o/r/compare/<base>...<head>` | `o/r@<base>...<head>` |
+| local | `/local?repo=<abs>&range=<range>` | `local:<repo>:<range>` |
+| paste | `/paste/<id>` | `paste:<id>` |
+
+commit/compare use GitHub's own paths, so the host-swap bookmarklet works. Non-PR kinds put the tab in a `tab=`
+query param (a `/overview` suffix would be ambiguous after a compare ref with `/`); `only/q/file` work for every kind. `PrData.ref` becomes `ReviewRef`;
+`PrRef` stays for PR-only GitHub calls. Same-fork compares only (`owner:branch` is out of scope).
+
+Non-PR sources fill `PrData` as: `id = refKey`, `title` (commit subject; `base...head`; local: commit subject for a
+single-commit range, else `git diff <range>` / "Uncommitted changes"; paste: first `Subject:` line or "Pasted diff"),
+`url` (GitHub commit/compare URL, or ''), `state = ''`, `isDraft = false`, `author` (commit author if it maps to a
+GitHub user, else null), `viewer = {login:'you', avatarUrl:''}`, `baseRefName/headRefName` (short shas / refs /
+`HEAD` ← `working tree`), `baseOid/headOid/mergeBaseOid` (below), `threads`, `pendingReviewId = null`.
+
+`caps(ref)`: `github` (CI, conversation, Review submit; pr only), `localState` (all non-pr), `anyLine` (every row is
+commentable and ranges may span hunks on one side; all non-pr), `blobs: 'github' | 'local' | 'none'`.
+
+### Loading
+
+- **commit**: REST `repos/o/r/commits/<sha>?per_page=100`, following `Link rel="next"` (GitHub caps at 3000 files)
+  → parents, message, author, files with patches; `baseOid = mergeBaseOid = parents[0]` (root commit: the empty tree
+  `4b825dc642cb6eb9a060e54bf8d69288fbee4904`; every file is added). Missing patches come from
+  `Accept: application/vnd.github.diff` on the same path, split with `splitUnifiedDiff`. If the list hit the cap,
+  the `.diff` (parsed with `parseUnifiedDiff`) becomes the file list; if that fails too, `changedFiles` is set above
+  `files.length` so the existing "not all files listed" banner shows.
+- **compare**: resolve `base`/`head` to oids with GraphQL `object(expression:)`, then REST
+  `repos/o/r/compare/<baseOid>...<headOid>?per_page=1` → `merge_base_commit.sha`, files. GitHub returns at most 300
+  files (verified 2026-11-17 via the `gh` token: v6.0...v6.1 of torvalds/linux gives 300 on page 1, 0 on page 2);
+  at exactly 300 the `.diff` becomes the file list. The `.diff` returns HTTP 422 "taking too long" for huge ranges
+  (verified); then the banner as above. Blob base = merge base.
+- **local**: server `GET /api/local/diff?repo=&range=` → `{root, range, baseOid, headOid, mergeBaseOid, title,
+  author, diff}`; the client parses `diff` with `parseUnifiedDiff`. `mergeBaseOid = baseOid` = the left side actually
+  diffed (see range table), so `loadBigDiff` reads the right base. For ranges that end at the working tree,
+  `headOid = 'worktree:' + sha256(diff)[:16]` so the revision changes when the content does, and the server keeps a
+  **snapshot** of every changed worktree file's content taken right after the diff (in memory, last 8 snapshots,
+  ≤ 64 MB each; larger files are left out → `truncated`). Worktree blob requests are served only from that snapshot
+  (unknown snapshot → `missing`), so a later edit can't be shown as unchanged context.
+- **paste**: `GET /api/paste/<id>` → text → `parseUnifiedDiff`. No blobs: patch view only (no context expansion).
+- `parseUnifiedDiff(text): PrFile[]` (new, `src/lib/unidiff.ts`) handles `git diff` output (`diff --git`, `new/deleted
+  file mode`, `rename from/to`, `copy from/to`, `similarity index`, `Binary files … differ`, `GIT binary patch`,
+  `old/new mode`, quoted paths) and plain unified diffs (`--- a` / `+++ b` without a `diff --git` header, `diff -u`,
+  `Index:` lines ignored). Counts come from the +/- lines. `viewed` is filled in by the state layer. Combined diffs
+  (`diff --cc`) are not supported (merges are diffed against the first parent). Each file gets
+  `fingerprint = sha256(JSON [path, previousPath, status, oldMode/newMode, index oids or REST `sha`, patch])`, so
+  binary, mode-only and pure-rename changes still change it.
+- Blobs: commit/compare reuse `fetchBlobs` (GitHub GraphQL, IndexedDB cache). Local uses `POST /api/local/blobs
+  {repo, specs:[{commit, path}]}` → `{"<commit>:<path>": BlobResult}`; `commit` is a full sha or a `worktree:` oid
+  (read from disk). Local blobs are not cached in IndexedDB.
+- The PR snapshot cache (`prs` store) keys by `refKey` for every kind (stale-while-revalidate first paint).
+
+### Server (no new dependencies)
+
+- `GET /api/ping` → `{ok:true, name:'diff-review', version}` (the CLI's liveness check).
+- **Local git**: `repo` must be absolute and equal `realpath(git -C repo rev-parse --show-toplevel)`. Range → (left,
+  right): `''` → (`HEAD`, or the empty tree when `HEAD` is unborn; working tree + untracked); `<rev>` → (rev, working
+  tree + untracked); `<a>..<b>` → (a, b); `<a>...<b>` → (merge-base(a, b), b); `<rev>^!` → (first parent, or the
+  empty tree for a root commit; rev). Git runs as `git diff <left> [<right>]` with resolved oids. A rev is
+  `^[A-Za-z0-9_./~^@{}:+-]{1,200}$`, must not start with `-`, and is resolved with
+  `git rev-parse --verify --end-of-options <rev>^{commit}` before use; all git calls get resolved oids, never raw
+  user text. Commands: `execFile('git', ['-C', root, '-c', 'core.quotepath=off', 'diff', '--no-color',
+  '--no-ext-diff', '--no-textconv', '--find-renames', '--full-index', ...])`, env `GIT_OPTIONAL_LOCKS=0`,
+  timeout 30 s, maxBuffer 256 MB, and `-c core.fsmonitor=false`. Trust boundary: opening a repo runs git in it, the
+  same as typing `git diff` there (clean filters such as LFS still run); only processes that can send the `x-ghr`
+  header (not websites) can ask. Untracked: `git ls-files --others --exclude-standard -z`, each one diffed with
+  `git diff --no-index -- /dev/null <path>` (exit 1 is success), capped at 1000 files; files > 5 MB become a
+  "Binary/too large" entry. A path already in the tracked diff (as path or rename source) is not added again
+  (tracked wins), so paths stay unique. Worktree blob reads: `realpath` must stay inside `root` and not under `.git`; > 5 MB →
+  `truncated`.
+- **Pastes**: `POST /api/paste {diff}` (≤ 50 MB) → `{id}`; stored at `<state>/pastes/<id>.diff`. `GET /api/paste/<id>`
+  (`id` must be 64 hex).
+- **Review state**: `<state> = $DIFF_REVIEW_STATE_DIR || ${XDG_STATE_HOME:-~/.local/state}/diff-review`.
+  `GET /api/state?key=<refKey>` → doc or 404; `PUT /api/state?key=` with `{doc, baseVersion}` → `{version}`, or 409
+  `{doc}` when `baseVersion` ≠ stored version. Read-check-increment-write is serialized per key (in-process promise
+  chain; one server). Stored at `<state>/reviews/<sha256(key)>.json`, written to a unique temp file + rename. `GET /api/states` → `[{key, ref, title, updatedAt, threads, open, viewed}]` (Home + CLI).
+  Body limit for these routes: 5 MB.
+- REST allowlist adds `repos/o/r/commits/<hex7-40>(?page/per_page)` and `repos/o/r/compare/<ref>...<ref>`, where
+  ref = `[A-Za-z0-9_./-]+` with no `..` segment. `/api/diff/` accepts the same commit/compare paths.
+- User-Agent `diff-review`.
+
+```ts
+interface ReviewDoc {
+  key: string; ref: ReviewRef; title: string; version: number; updatedAt: string;
+  viewed: Record<string, string>;               // path -> PrFile.fingerprint of the version marked viewed
+  threads: LocalThread[];
+}
+interface QuoteLine { kind: 'ctx' | 'del' | 'add' | 'gap'; text: string } // 'gap' = lines not loaded (text '')
+interface LocalThread {
+  id: string; path: string; subjectType: 'LINE' | 'FILE';
+  side: Side; line: number | null; startSide: Side | null; startLine: number | null;
+  quote: QuoteLine[];                            // rows startIdx..endIdx of the rendered model ([] for FILE)
+  outdated: boolean;                             // last computed by the UI; read by the CLI export
+  resolved: boolean;
+  comments: Array<{ id: string; body: string; createdAt: string; updatedAt?: string }>;
+}
+```
+
+`NewThread` gains `quote?: QuoteLine[]`, captured by the UI from the model rows it rendered (a range across an
+unloaded gap records one `gap` entry).
+
+### Local state semantics (client, `src/lib/localstate.ts`)
+
+- Viewed: `VIEWED` if `viewed[path] === file.fingerprint`, `DISMISSED` if set but different, else `UNVIEWED`.
+  For local sources `markViewed` bypasses the GitHub viewed book: each intent carries the fingerprint of the file
+  as displayed when clicked, and that fingerprint is what gets stored (never re-read at write time).
+- Threads map to `Thread` with `viewerCanUpdate/Delete/Resolve/Unresolve/Reply = true`, comment `state = 'LOCAL'`,
+  `author = viewer`, `bodyHTML = ''` (rendered as escaped preformatted text).
+- Anchoring (`src/lib/anchor.ts`, pure): a thread sits at its stored coordinates if the model rows there match the
+  whole quote (gap entries match anything); otherwise, once the model is complete, it moves to the unique place
+  where the whole quote matches on that side; no match or several → `isOutdated` (listed under the file header).
+  The UI writes a changed `outdated` flag back to the doc (debounced, no toast).
+- Persistence: one serialized writer per key. The doc in memory is the acknowledged server doc plus a queue of
+  pending ops (add thread, reply, edit, delete, resolve, viewed set/unset); ops apply in order and each PUT sends
+  the result with `baseVersion` = last acknowledged version; ops arriving during a PUT wait for the next one
+  (debounce 300 ms). Each op's promise settles when the PUT carrying it settles. On failure or 409 the queue is
+  dropped, the doc is refetched, and the store's threads and viewed state are **replaced** from it (no per-op
+  rollback), with a toast ("Changed elsewhere; reloaded" / "Save failed: …").
+- Store: `backendFor(ref)` returns the GitHub backend (today's `github.ts` calls) or the local one. Conversation,
+  checks, submit, discard: PR only.
+- Refresh (`r`, window focus; throttle 5 s for local, 30 s otherwise): for non-PR kinds a changed revision reloads
+  in place (no "PR changed" banner); threads re-anchor, viewed re-derives from fingerprints.
+
+### Export (`src/lib/export.ts`, pure, used by the UI and the CLI)
+
+`exportMarkdown(doc: ReviewDoc, {source, order?: string[], includeResolved}): string`. Every eligible stored thread
+is exported, whether or not its path is in the current diff: paths in `order` (the current diff's file order)
+first, then the rest alphabetically; threads by line, file-level first. Quotes come from the doc, so no diff is
+needed. `source` is the reproducible origin (`git diff <range>` in `<repo>`, GitHub URL, "pasted diff").
+
+````md
+# Review: <title>
+
+Source: `git diff main...HEAD` in /Users/x/repo
+
+## src/app.ts
+
+### src/app.ts:12-14
+```ts
+ unchanged line
+-removed line
++added line
+```
+<comment body>
+
+> reply: <reply body>
+
+### src/app.ts (file)
+<comment body>
+````
+
+Removed-line anchors read `src/app.ts:12 (old)`. Outdated ones add ` (outdated: code changed since)`; a `gap` quote
+line prints as `…`. Fence length grows past any backtick run in the quote; the info string is the language from
+`src/lib/languages.ts` or empty. Unresolved only unless `includeResolved`.
+
+### UI (Claude)
+
+- Home: paste box accepts PR, commit and compare URLs; a "Paste a diff" textarea (and file drop) → `POST /api/paste`
+  → `/paste/<id>`. Recent list covers every kind (localStorage `ghr:recent` entries gain `ref`; old PR entries are
+  migrated on read); live GitHub status only for PRs.
+- TopBar for non-PR: title, source chip (commit sha / `base...head` / repo + range / pasted), author if known,
+  counts; no CI chip, no Conversation tab, no Review button. Instead **Comments · N** (unresolved) with
+  **Copy Markdown**, **Download .md**, "include resolved" toggle.
+- Any line commentable (`anyLine`): `lineAnchor` ignores `hunk`, `validRange` only requires the same side… for local
+  the GitHub hunk message never appears. GitHub "open file" links only when the source is on GitHub.
+- Local comments show no "Pending" chip; edit/delete/resolve as today.
+
+### CLI `bin/diff-review.ts` (`package.json` `bin`, so `npm link` or a symlink puts it on PATH)
+
+```
+diff-review [<range>]           review a local git diff in the current repo ('' = uncommitted incl. untracked)
+diff-review -c|--commit <rev>   one commit (<rev>^!)
+diff-review <file.diff|.patch>  review a diff file;  `-` reads stdin (git diff | diff-review -)
+diff-review <github-url>        PR / commit / compare URL
+diff-review export [<same args>] [--all]   print the review's comments as Markdown to stdout
+diff-review --print             print the URL instead of opening it
+```
+
+Server autostart: ping `127.0.0.1:$PORT` (default 7777); if down, build `dist/` when missing (`npm run build` in the
+project root), spawn `node server/server.ts` detached (log to `<state>/server.log`), poll ping ≤ 10 s. Open with
+`open` (macOS) or `xdg-open`. `export` resolves the same `refKey` as the UI (repo toplevel realpath + range as
+typed; paste id = sha256 of the file/stdin; commit/compare keys from the URL), reads `GET /api/state` (and, for
+local, `GET /api/local/diff` for file order), and prints `exportMarkdown`; Node-side HTTP uses absolute
+`http://127.0.0.1:$PORT` URLs with the `x-ghr` header. PR URLs: exit 1, "PR comments live on GitHub". Exit 1 with a
+message when there is no stored review.
+
+### Rename
+
+Package, README, docs, CLI, User-Agent, IndexedDB name (`diff-review`; the old cache is dropped, it is
+best-effort) become `diff-review`. Internal `ghr:` localStorage keys, the `x-ghr` header and `GHR_DEV` stay, so
+settings, rules and recent PRs survive. The repo directory and the GitHub repo name are left to the user.
+
+### Implementation split
+
+1. Claude: this plan; contracts in `src/types.ts`.
+2. codex (medium): server routes + tests; `unidiff.ts`, sources (commit/compare/local/paste loaders),
+   `localstate.ts`, `export.ts`, CLI + tests. Must not touch `src/ui/**`, `src/styles.css`, `src/main.tsx`.
+3. Claude: router, store backend switch, UI, rename.
+4. Verify: a real commit and compare on a public repo, this repo's uncommitted changes, a pasted diff, CLI export.
+5. codex review @ xhigh; fix; commit.
+
+### v3 plan-review outcomes (gpt-6.1-sol @ xhigh, 16 findings)
+
+Accepted and folded in above: 1 per-key serialized state writes; 2 one serialized writer per key, failures replace
+store state from the server doc; 3 viewed intents carry the displayed fingerprint; 4 worktree blobs come from a
+snapshot taken with the diff; 5 quotes captured from the rendered model with row kinds; 6 whole-quote anchoring with
+unique relocation; 7 export covers threads whose path left the diff; 9 `per_page=100` + `Link` paging, `.diff` as
+the file list when capped, banner when that fails; 10 fingerprints include modes/oids; 12 unborn `HEAD` → empty
+tree; 13 tracked diff wins over untracked duplicates; 14 explicit (left, right) per range, merges vs first parent;
+15 non-PR tabs in a `tab=` query param; 16 CLI export reads the stored doc, PR export refused.
+
+Partly accepted: 8 `core.fsmonitor=false` added; clean filters still run (disabling them breaks LFS), and the trust
+boundary is documented as "same as running `git diff` there". 11 not fixed (known limit): with CRLF checkouts or
+normalising attributes, the disk snapshot can disagree with git's normalised patch; `buildModel` then refuses the
+blob and the file stays on the patch view (correct, just without context expansion).
