@@ -29,10 +29,11 @@ diff-review -c HEAD             # one commit
 git diff | diff-review -        # a diff from stdin; or: diff-review fix.patch
 diff-review <github url>        # a PR, commit or compare
 diff-review export [same args]  # print the comments as Markdown (--all includes resolved)
+diff-review server [status|start|stop|restart]   # the background server; restart also rebuilds the UI
 ```
 
 The CLI starts the server if it isn't running (log: `~/.local/state/diff-review/server.log`) and opens the browser;
-`--print` prints the URL instead. A local diff refreshes on window focus, so you can keep it open while an agent works.
+`--print` prints the URL instead. After pulling changes, run `diff-review server restart`. A local diff refreshes on window focus, so you can keep it open while an agent works.
 
 ## Pull requests
 

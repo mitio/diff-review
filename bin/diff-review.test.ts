@@ -12,6 +12,11 @@ import { parseArgs } from './diff-review.ts';
 
 const env = { isFile: (p: string) => p === 'x.patch' };
 describe('parseArgs', () => {
+  it('parses server subcommands', () => {
+    expect(parseArgs(['server'], env)).toEqual({ action: 'server', op: 'status' });
+    expect(parseArgs(['server', 'restart', '--port', '7800'], env)).toEqual({ action: 'server', op: 'restart', port: 7800 });
+    expect(() => parseArgs(['server', 'stop', 'now'], env)).toThrow('unknown server argument');
+  });
   it('selects local ranges and single commits', () => {
     expect(parseArgs([], env)).toMatchObject({ action: 'review', source: { kind: 'local', range: '' } });
     expect(parseArgs(['main...HEAD'], env)).toMatchObject({ source: { kind: 'local', range: 'main...HEAD' } });

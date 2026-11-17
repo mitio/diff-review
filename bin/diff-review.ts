@@ -10,13 +10,15 @@ import type { LocalDiff, ReviewDoc, ReviewRef } from '../src/types.ts';
 import { appPath, parseReviewInput, refKey } from '../src/lib/refs.ts';
 import { exportMarkdown, sourceLine } from '../src/lib/export.ts';
 
-export type Command = { action: 'help' } | {
+export type ServerOp = 'status' | 'start' | 'stop' | 'restart';
+export type Command = { action: 'help' } | { action: 'server'; op: ServerOp; port?: number } | {
   action: 'review' | 'export'; print: boolean; all: boolean; port?: number;
   source: { kind: 'local'; range: string } | { kind: 'stdin' } | { kind: 'file'; path: string } | { kind: 'ref'; ref: ReviewRef };
 };
 
 export function parseArgs(argv: string[], env: { isFile(p: string): boolean }): Command {
   if (argv.includes('-h') || argv.includes('--help')) return { action: 'help' };
+  if (argv[0] === 'server') return parseServer(argv.slice(1));
   const args = [...argv];
   let action: 'review' | 'export' = args[0] === 'export' ? (args.shift(), 'export') : 'review';
   let print = false, all = false, port: number | undefined, commit: string | undefined;
@@ -31,10 +33,8 @@ export function parseArgs(argv: string[], env: { isFile(p: string): boolean }): 
     else if (flags && (arg === '-c' || arg === '--commit' || arg === '--port')) {
       const value = args[++i];
       if (!value || value.startsWith('-')) throw new Error(`missing value for ${arg}`);
-      if (arg === '--port') {
-        if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) throw new Error('invalid port');
-        port = Number(value);
-      } else {
+      if (arg === '--port') port = parsePort(value);
+      else {
         if (commit !== undefined) throw new Error('only one commit is allowed');
         commit = value;
       }
@@ -57,12 +57,30 @@ export function parseArgs(argv: string[], env: { isFile(p: string): boolean }): 
   return { action, source, print, all, ...(port === undefined ? {} : { port }) };
 }
 
+function parseServer(args: string[]): Command {
+  let op: ServerOp = 'status', port: number | undefined, seen = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--port') port = parsePort(args[++i]);
+    else if (!seen && ['status', 'start', 'stop', 'restart'].includes(arg)) { op = arg as ServerOp; seen = true; }
+    else throw new Error(`unknown server argument: ${arg}`);
+  }
+  return { action: 'server', op, ...(port === undefined ? {} : { port }) };
+}
+
+function parsePort(value: string | undefined): number {
+  if (!value || !/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) throw new Error('invalid port');
+  return Number(value);
+}
+
 const usage = `diff-review [<range>]           review a local git diff in the current repo ('' = uncommitted incl. untracked)
 diff-review -c|--commit <rev>   one commit (<rev>^!)
 diff-review <file.diff|.patch>  review a diff file;  \`-\` reads stdin (git diff | diff-review -)
 diff-review <github-url>        PR / commit / compare URL
 diff-review export [<same args>] [--all]   print the review's comments as Markdown to stdout
 diff-review --print             print the URL instead of opening it
+diff-review server [status|start|stop|restart]
+                                the background server (started on demand; restart rebuilds the UI)
 
 -h, --help                     show help
 --port <n>                     server port (default: PORT or 7777)
@@ -72,28 +90,36 @@ const exec = promisify(execFile);
 const root = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const stateDir = process.env.DIFF_REVIEW_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'diff-review');
 
+interface ServerInfo { version?: string; pid?: number; startedAt?: string }
+const baseUrl = (port: number) => `http://127.0.0.1:${port}`;
+const logPath = join(stateDir, 'server.log');
+
+/** The diff-review server on this port, or null if nothing listens; throws if something else does. */
+async function probe(port: number): Promise<ServerInfo | null> {
+  let response: Response;
+  try { response = await fetch(`${baseUrl(port)}/api/ping`, { headers: { 'x-ghr': '1' }, signal: AbortSignal.timeout(1000) }); }
+  catch { return null; }
+  let identity: ServerInfo & { name?: string };
+  try { identity = await response.json(); }
+  catch { throw new Error(`port ${port} is used by something else (an old gh-review server? stop it, or use --port)`); }
+  if (identity?.name !== 'diff-review') throw new Error(`port ${port} is used by something else`);
+  return response.ok ? identity : null;
+}
+
+async function build() {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('npm', ['run', 'build'], { cwd: root, stdio: ['ignore', 2, 2] });
+    child.on('error', reject);
+    child.on('exit', code => code === 0 ? resolve() : reject(new Error('npm run build failed')));
+  });
+}
+
 async function ensureServer(port: number): Promise<string> {
-  const base = `http://127.0.0.1:${port}`;
-  const ping = async (): Promise<boolean> => {
-    let response: Response;
-    try { response = await fetch(`${base}/api/ping`, { headers: { 'x-ghr': '1' }, signal: AbortSignal.timeout(1000) }); }
-    catch { return false; }
-    let identity: { name?: string };
-    try { identity = await response.json(); }
-    catch { throw new Error(`port ${port} is used by something else (an old gh-review server? stop it, or use --port)`); }
-    if (identity?.name !== 'diff-review') throw new Error(`port ${port} is used by something else`);
-    return response.ok;
-  };
+  const base = baseUrl(port);
+  const ping = async () => !!(await probe(port));
   if (await ping()) return base;
-  if (!existsSync(join(root, 'dist/index.html'))) {
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn('npm', ['run', 'build'], { cwd: root, stdio: ['ignore', 2, 2] });
-      child.on('error', reject);
-      child.on('exit', code => code === 0 ? resolve() : reject(new Error('npm run build failed')));
-    });
-  }
+  if (!existsSync(join(root, 'dist/index.html'))) await build();
   await mkdir(stateDir, { recursive: true });
-  const logPath = join(stateDir, 'server.log');
   const log = await open(logPath, 'a');
   try {
     await new Promise<void>((resolve, reject) => {
@@ -113,11 +139,49 @@ async function ensureServer(port: number): Promise<string> {
   throw new Error(`server failed to start; see ${logPath}`);
 }
 
+async function stopServer(port: number): Promise<ServerInfo | null> {
+  const info = await probe(port);
+  if (!info) return null;
+  const response = await fetch(`${baseUrl(port)}/api/shutdown`, { method: 'POST', headers: { 'x-ghr': '1' } });
+  if (!response.ok) {
+    throw new Error(`this server predates \`server stop\`; stop it once with: kill $(lsof -ti tcp:${port} -sTCP:LISTEN)`);
+  }
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (!await probe(port)) return info;
+  }
+  throw new Error(`server on port ${port} did not stop`);
+}
+
+function describeServer(port: number, info: ServerInfo): string {
+  const since = info.startedAt ? `, since ${new Date(info.startedAt).toLocaleString()}` : '';
+  return `running on ${baseUrl(port)} (pid ${info.pid ?? '?'}${since})\nlog: ${logPath}\n`;
+}
+
+async function server(op: ServerOp, port: number) {
+  if (op === 'status') {
+    const info = await probe(port);
+    process.stdout.write(info ? describeServer(port, info) : `not running on port ${port}\n`);
+  } else if (op === 'stop') {
+    const info = await stopServer(port);
+    process.stdout.write(info ? `stopped (pid ${info.pid ?? '?'})\n` : `not running on port ${port}\n`);
+  } else {
+    if (op === 'restart') {
+      await stopServer(port);
+      await build();
+    }
+    await ensureServer(port);
+    process.stdout.write(describeServer(port, (await probe(port))!));
+  }
+}
+
 async function main() {
   const command = parseArgs(process.argv.slice(2), { isFile: p => { try { return statSync(p).isFile(); } catch { return false; } } });
   if (command.action === 'help') { process.stdout.write(usage); return; }
   const port = command.port ?? Number(process.env.PORT || 7777);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid port');
+  if (command.action === 'server') return server(command.op, port);
   let ref: ReviewRef;
   if (command.source.kind === 'ref') ref = command.source.ref;
   else if (command.source.kind === 'local') {

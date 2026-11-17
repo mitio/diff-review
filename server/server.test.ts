@@ -477,3 +477,15 @@ it('lists raw blob paths in git order, excluding gitlinks', async () => {
     expect((await get(`/api/local/files?${new URLSearchParams({repo: dir, rev:first})}`, { headers: api })).status).toBe(404);
   } finally { await rm(repo, { recursive: true, force: true }); }
 });
+it('reports its pid and shuts down only when the process allows it', async () => {
+  const onShutdown = vi.fn();
+  const get = await start({ onShutdown });
+  expect(JSON.parse((await get('/api/ping', { headers: api })).body)).toMatchObject({ name: 'diff-review', pid: process.pid });
+  expect((await get('/api/shutdown', { headers: api })).status).toBe(405);
+  expect((await get('/api/shutdown', { method: 'POST' })).status).toBe(403);
+  expect(onShutdown).not.toHaveBeenCalled();
+  expect((await get('/api/shutdown', { method: 'POST', headers: api })).status).toBe(200);
+  expect(onShutdown).toHaveBeenCalledOnce();
+  const plain = await start();
+  expect((await plain('/api/shutdown', { method: 'POST', headers: api })).status).not.toBe(200);
+});

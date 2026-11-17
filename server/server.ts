@@ -120,7 +120,10 @@ export function createApp(opts: {
   stateDir?: string;
   getToken?: () => Promise<string>;
   fetchImpl?: typeof fetch;
+  /** POST /api/shutdown calls it (the CLI's `server stop`); without it the route is 404 */
+  onShutdown?: () => void;
 }): http.Server {
+  const startedAt = new Date().toISOString();
   const stateDir = opts.stateDir ?? (process.env.DIFF_REVIEW_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'diff-review'));
   const snapshots = new Map<string, Map<string, BlobResult>>();
   const writers = new Map<string, Promise<unknown>>();
@@ -227,7 +230,10 @@ export function createApp(opts: {
     const method = (expected: string) => { if (req.method !== expected) throw new ApiError(405, 'Method not allowed'); };
     const body = async (limit: number) => JSON.parse(await jsonBody(req, limit));
     if (path === '/api/ping') {
-      method('GET'); json(res, 200, { ok: true, name: 'diff-review', version: await version });
+      method('GET'); json(res, 200, { ok: true, name: 'diff-review', version: await version, pid: process.pid, startedAt });
+    } else if (path === '/api/shutdown' && opts.onShutdown) {
+      method('POST'); json(res, 200, { ok: true });
+      res.once('finish', opts.onShutdown);
     } else if (path === '/api/local/diff') {
       method('GET'); json(res, 200, await localDiff(await repoRoot(url.searchParams.get('repo')), url.searchParams.get('range') ?? ''));
     } else if (path === '/api/local/files') {
@@ -417,7 +423,15 @@ export function createApp(opts: {
 if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
   const port = Number(process.env.PORT || 7777);
   const distDir = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
-  createApp({ port, distDir, dev: process.env.GHR_DEV === '1' }).listen(port, '127.0.0.1', () => {
+  const server = createApp({
+    port, distDir, dev: process.env.GHR_DEV === '1',
+    onShutdown: () => {
+      console.log('diff-review stopping');
+      server.close(() => process.exit(0));
+      server.closeAllConnections();
+    },
+  });
+  server.listen(port, '127.0.0.1', () => {
     console.log(`diff-review on http://127.0.0.1:${port}`);
   });
 }
