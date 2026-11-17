@@ -1,5 +1,6 @@
 {
   "name": "diff-review",
+  "version": "0.0.0",
   "bin": {
     "diff-review": "bin/diff-review.ts"
   },
