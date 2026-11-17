@@ -2,7 +2,7 @@ import { memo, useMemo, useState, type ReactNode } from 'react';
 import type { PrFile, TreeNode } from '../types.ts';
 import { buildTree, categorize, CATEGORIES, CATEGORY_LABELS } from '../lib/categorize.ts';
 import {
-  addRule, fileHidden, isViewed, markViewed, matchesFilter, matchesFocus, toggleFileHidden, updateSettings, useStore,
+  addRule, closeOpened, fileHidden, openedFiles, isViewed, markViewed, matchesFilter, matchesFocus, toggleFileHidden, updateSettings, useStore,
   type Grouping,
 } from './store.ts';
 import { MiniBar, StatusLetter } from './bits.tsx';
@@ -71,9 +71,40 @@ export function Sidebar() {
           <button className="small" onClick={() => useStore.setState({ focus: null })}>clear</button>
         </div>
       )}
-      <div className="list">{list}</div>
+      <div className="list">
+        {list}
+        <OpenedList />
+      </div>
       <Resizer />
     </aside>
+  );
+}
+
+/** Files outside the diff opened with the file finder. */
+function OpenedList() {
+  const opened = useStore(s => s.opened);
+  if (!opened.length) return null;
+  return (
+    <>
+      <div className="frow grow" style={{ paddingLeft: 4, marginTop: 6 }}>
+        <span className="fname muted" title="Files outside the diff, opened with Go to file (T)">Other files</span>
+      </div>
+      {openedFiles({ opened }).map(f => <OpenedRow key={f.path} f={f} />)}
+    </>
+  );
+}
+
+function OpenedRow({ f }: { f: PrFile }) {
+  const current = useStore(s => s.current === f.path);
+  const nThreads = useStore(s => s.threadsByPath[f.path]?.length ?? 0);
+  return (
+    <div className={`frow${current ? ' current' : ''}`} style={{ paddingLeft: 18 }} onClick={() => goToFile(f.path)} title={f.path}>
+      <StatusLetter status={f.status} />
+      <span className="fname">{f.path}</span>
+      {nThreads > 0 ? <span className="count">💬{nThreads}</span> : (
+        <button className="link small" title="Close" onClick={e => { e.stopPropagation(); closeOpened(f.path); }}>×</button>
+      )}
+    </div>
   );
 }
 

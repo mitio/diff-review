@@ -4,7 +4,7 @@ import { buildModel, lineAnchor, parsePatch, splitPairs, validRange, view, wordD
 import { anchorStatus, locateThread, quoteRows } from '../lib/anchor.ts';
 import { ghRepo } from '../lib/refs.ts';
 import {
-  ALL, closeComposer, expand, fileHidden, isLocalReview, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
+  ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, setCollapsed,
   setLocalOutdated, setOutlineOpen, toast, toggleFileHidden, toggleOutline, toggleOutlineSection, useStore, type ComposerTarget,
 } from './store.ts';
 import { Lazy } from './Lazy.tsx';
@@ -56,13 +56,14 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
 
   const model: FileModel | null = useMemo(() => {
     if (bigDiff && typeof bigDiff === 'object' && 'rows' in bigDiff) return { rows: bigDiff.rows, complete: true };
-    if (!file.patch) return null;
+    if (!file.patch && !isUnchanged(file)) return null;
     const text = blob && blob !== 'loading' && !blob.binary && !blob.truncated && !blob.missing ? blob.text : null;
     return buildModel(file, parsed(file), text);
     // keyed on content, not the file object: a fresh snapshot of the same revision must keep the model (and its highlighting)
   }, [file.path, file.patch, file.status, blob, bigDiff]);
 
   const changed = file.additions + file.deletions;
+  const unchanged = isUnchanged(file);
   /** per thread: itself if it goes under the header (file-level, outdated, or not placeable yet), else null */
   const { located, flags } = useMemo(() => {
     const flags: Record<string, boolean> = {};
@@ -94,6 +95,8 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
           <button className="small" onClick={() => setForceBig(true)}>Show diff</button>
         </div>
       );
+    } else if (unchanged) {
+      body = <div className="fnote">{!blob || blob === 'loading' ? 'Loading…' : blob.missing ? 'Not in the head version.' : blob.binary ? 'Binary file.' : 'Too large to show (over 5 MB).'}</div>;
     } else if (bigDiff === 'loading') {
       body = <div className="fnote">Loading and diffing both versions…</div>;
     } else if (bigDiff && 'error' in bigDiff) {
@@ -127,8 +130,12 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         <span className="path" title={path} onClick={() => setCollapsed(path, !collapsed)}>
           <bdi>{file.previousPath ? `${file.previousPath} → ${path}` : path}</bdi>
         </span>
-        <span className="add mono">+{file.additions}</span>
-        <span className="del mono">−{file.deletions}</span>
+        {unchanged ? <span className="faint">not changed</span> : (
+          <>
+            <span className="add mono">+{file.additions}</span>
+            <span className="del mono">−{file.deletions}</span>
+          </>
+        )}
         {viewed === 'DISMISSED' && <span className="chip warn">changed since viewed</span>}
         {hidden && <span className="chip">hidden</span>}
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
@@ -136,16 +143,23 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         <button className={`small${outlined ? ' on' : ''}`} title="Show only the file's structure (z)" onClick={() => toggleOutline(path)}>
           Outline
         </button>
-        <button className="small" title="Comment on file" onClick={() => { setCollapsed(path, false); openComposer(path, { kind: 'file' }); }}>
-          Comment
-        </button>
-        <button className="small" title={hidden ? 'Unhide' : 'Hide this file'} onClick={() => toggleFileHidden(file)}>
-          {hidden ? 'Unhide' : 'Hide'}
-        </button>
+        {(!unchanged || localReview) && (
+          <button className="small" title="Comment on file" onClick={() => { setCollapsed(path, false); openComposer(path, { kind: 'file' }); }}>
+            Comment
+          </button>
+        )}
+        {!unchanged && (
+          <button className="small" title={hidden ? 'Unhide' : 'Hide this file'} onClick={() => toggleFileHidden(file)}>
+            {hidden ? 'Unhide' : 'Hide'}
+          </button>
+        )}
         {ghUrl && <a className="btn small" title="View file at head on GitHub" target="_blank" rel="noreferrer" href={ghUrl}>↗</a>}
-        <label title="Mark viewed (v)">
-          <input type="checkbox" checked={isViewed(viewed)} onChange={e => markViewed([path], e.target.checked)} /> Viewed
-        </label>
+        {!unchanged && (
+          <label title="Mark viewed (v)">
+            <input type="checkbox" checked={isViewed(viewed)} onChange={e => markViewed([path], e.target.checked)} /> Viewed
+          </label>
+        )}
+        {unchanged && threads.length === 0 && <button className="small" title="Close this file" onClick={() => closeOpened(path)}>Close</button>}
       </header>
       {!collapsed && (fileThreads.length > 0 || composer?.kind === 'file') && (
         <div className="file-threads">
@@ -174,11 +188,13 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const path = file.path;
   const hlOn = useStore(s => s.settings.highlight) && hlReady;
   const toks = useHighlight(model, path, hlOn);
-  const viewMode = useStore(s => s.settings.viewMode);
+  const unchanged = isUnchanged(file);
+  // a file outside the diff shows whole, in one column
+  const viewMode = useStore(s => (unchanged ? 'unified' : s.settings.viewMode));
   const anyLine = useStore(s => isLocalReview(s));
   const ctxSetting = useStore(s => s.settings.context);
   const stored = useStore(s => s.expansions[path]) ?? EMPTY;
-  const context = ctxSetting >= ALL ? Infinity : ctxSetting;
+  const context = ctxSetting >= ALL || unchanged ? Infinity : ctxSetting;
 
   const byRow = useMemo(() => {
     const m = new Map<number, Thread[]>();
@@ -226,7 +242,10 @@ function DiffBody({ file, model, threads, composer, hlReady, range }: BodyProps 
   const chunks: Array<Array<Item | SplitItem>> = [];
   for (let i = 0; i < list.length; i += CHUNK) chunks.push(list.slice(i, i + CHUNK));
 
-  const ctx: RowCtx = { file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn, anyLine };
+  const ctx: RowCtx = {
+    file, model, byRow: byRow.m, composer: sel, dragging: !!drag, partner, split: viewMode === 'split', toks, hlOn, anyLine,
+    readOnly: unchanged && !anyLine,
+  };
 
   return (
     <>
@@ -315,6 +334,8 @@ interface RowCtx {
   hlOn: boolean;
   /** local review: every line is commentable */
   anyLine: boolean;
+  /** a PR file outside the diff: GitHub takes no comments there */
+  readOnly: boolean;
 }
 
 function Chunk({ items, ctx }: { items: Array<Item | SplitItem>; ctx: RowCtx }) {
@@ -386,7 +407,8 @@ function LineComposer({ path, r, model }: { path: string; r: Extract<RangeCheck,
 }
 
 function onNumDown(e: MouseEvent<HTMLElement>, idx: number, ctx: RowCtx, clicked: Side) {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || ctx.readOnly) return;
+  if (isUnchanged(ctx.file)) clicked = 'RIGHT';
   e.preventDefault();
   const path = ctx.file.path;
   const row = ctx.model.rows[idx];
@@ -469,9 +491,10 @@ const SIGN = { add: '+', del: '−', ctx: ' ' } as const;
 const UnifiedRow = memo(function UnifiedRow({ idx, ctx }: { idx: number; ctx: RowCtx }) {
   const row = ctx.model.rows[idx];
   const nc = row.hunk == null && !ctx.anyLine ? ' nc' : '';
+  const whole = isUnchanged(ctx.file);
   return (
     <tr className={`${row.kind}${inSel(ctx, idx) ? ' sel' : ''}${row.noEol ? ' noeol' : ''}`}>
-      <td className={`num${nc}`} data-idx={idx} data-side="LEFT" onMouseDown={e => onNumDown(e, idx, ctx, 'LEFT')}>{row.oldNo ?? ''}</td>
+      <td className={`num${nc}`} data-idx={idx} data-side={whole ? 'RIGHT' : 'LEFT'} onMouseDown={e => onNumDown(e, idx, ctx, 'LEFT')}>{whole ? '' : row.oldNo ?? ''}</td>
       <td className={`num${nc}`} data-idx={idx} data-side="RIGHT" onMouseDown={e => onNumDown(e, idx, ctx, 'RIGHT')}>{row.newNo ?? ''}</td>
       <td className="sign" data-idx={idx}>{SIGN[row.kind]}</td>
       <td className="code" data-idx={idx}><Code row={row} idx={idx} ctx={ctx} /></td>

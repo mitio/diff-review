@@ -294,7 +294,7 @@ it('handles unborn HEAD, root commits and untracked paths with spaces or escapes
 });
 it('enforces route methods, JSON shape and separate body limits', async () => {
   const get = await start();
-  for (const [path, method] of [['/api/ping', 'POST'], ['/api/local/diff', 'POST'], ['/api/local/blobs', 'GET'], ['/api/paste', 'GET'], ['/api/state?key=k', 'POST'], ['/api/states', 'PUT']]) {
+  for (const [path, method] of [['/api/ping', 'POST'], ['/api/local/diff', 'POST'], ['/api/local/blobs', 'GET'], ['/api/local/files', 'POST'], ['/api/paste', 'GET'], ['/api/state?key=k', 'POST'], ['/api/states', 'PUT']]) {
     const result = await get(path, { method, headers: api });
     expect(result.status).toBe(405);
     expect(JSON.parse(result.body)).toHaveProperty('message');
@@ -422,5 +422,58 @@ it('serves only snapshot contents the diff describes, and large untracked files 
     const second = await diff();
     expect(second.headOid).not.toBe(first.headOid);
     expect(second.diff).toContain('new file mode 100755');
+  } finally { await rm(repo, { recursive: true, force: true }); }
+});
+
+it('allows only exact REST tree paths and recursive queries', async () => {
+  const fetchImpl = vi.fn(async () => Response.json({tree:[]}));
+  const get = await start({ fetchImpl });
+  const tree = `repos/o/r/git/trees/${'Ab'.repeat(20)}`;
+  for (const suffix of ['', '?recursive=1']) {
+    expect((await get(`/api/rest/${tree}${suffix}`, { headers: api })).status).toBe(200);
+  }
+  expect(fetchImpl.mock.calls).toHaveLength(2);
+  for (const suffix of ['?', '?recursive=0', '?other=1', '?recursive=1&other=1', '?recursive=1&recursive=1']) {
+    expect((await get(`/api/rest/${tree}${suffix}`, { headers: api })).status).toBe(400);
+  }
+  expect((await get('/api/rest/repos/o/r/git/trees/abcdef0', { headers: api })).status).toBe(400);
+  for (const suffix of ['', '?recursive=1']) {
+    expect((await get(`/api/diff/${tree}${suffix}`, { headers: api })).status).toBe(400);
+  }
+  expect(fetchImpl.mock.calls).toHaveLength(2);
+});
+
+it('lists raw blob paths in git order, excluding gitlinks', async () => {
+  const { repo, git } = await gitRepo();
+  try {
+    const get = await start();
+    const files = (rev: string) => get(`/api/local/files?${new URLSearchParams({repo, rev})}`, { headers: api });
+    const empty = await files('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+    expect(empty.status).toBe(200);
+    expect(JSON.parse(empty.body)).toEqual({ paths: [] });
+    await mkdir(join(repo, 'nested'));
+    const paths = ['a space.txt', 'nested/tab\tfile', 'z\nfile'];
+    for (const path of paths) await writeFile(join(repo, path), 'content');
+    await git('add', '.'); await git('commit', '-m', 'files');
+    const first = await git('rev-parse', 'HEAD');
+    await git('update-index', '--add', '--cacheinfo', `160000,${first},sub`);
+    await git('commit', '-m', 'gitlink');
+    for (const rev of [await git('rev-parse', 'HEAD'), await git('rev-parse', 'HEAD^{tree}')]) {
+      const result = await files(rev);
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.body)).toEqual({ paths });
+    }
+    for (const rev of ['', 'HEAD', 'abcdef0', '-'.repeat(40), 'g'.repeat(40)]) {
+      const result = await files(rev);
+      expect(result.status).toBe(400);
+      expect(JSON.parse(result.body)).toEqual({ message: 'Invalid revision' });
+    }
+    for (const rev of ['f'.repeat(40), await git('rev-parse', 'HEAD:a space.txt')]) {
+      const result = await files(rev);
+      expect(result.status).toBe(404);
+      expect(JSON.parse(result.body)).toEqual({ message: 'Unknown revision' });
+    }
+    expect((await get('/api/local/files?repo=relative&rev=' + first, { headers: api })).status).toBe(400);
+    expect((await get(`/api/local/files?${new URLSearchParams({repo: dir, rev:first})}`, { headers: api })).status).toBe(404);
   } finally { await rm(repo, { recursive: true, force: true }); }
 });

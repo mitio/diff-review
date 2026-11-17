@@ -13,7 +13,7 @@ import { categorize, folderKey, isHidden, sidebarOrder } from '../lib/categorize
 import { diffInWorker, type Anchor } from '../lib/diff.ts';
 import { getPr, putPr } from '../lib/cache.ts';
 import { ghRepo, isPr, prRef, refKey } from '../lib/refs.ts';
-import { fetchLocalBlobs, loadSource } from '../lib/sources.ts';
+import { contentOid, fetchLocalBlobs, listFiles, loadSource } from '../lib/sources.ts';
 import { LocalReview, toThreads, viewedStates } from '../lib/localstate.ts';
 import { exportMarkdown, sourceLine } from '../lib/export.ts';
 
@@ -45,6 +45,9 @@ export type Tab = 'overview' | 'diff' | 'conversation';
 export interface Toast { id: number; text: string; error?: boolean }
 
 export type BigDiff = 'loading' | { rows: Row[] } | { error: string };
+
+/** Every file at the review's head, for the file finder; `rev` is the revision it was listed for. */
+export type FileTree = 'loading' | { rev: string; paths: string[]; truncated: boolean } | { rev: string; error: string };
 
 /** Path-keyed records are prototype-less so paths like "constructor" are safe keys. */
 export type Dict<T> = Record<string, T>;
@@ -88,6 +91,10 @@ interface State {
   pendingFile: string | null;
   /** shown in the diff even if filters, focus or hide rules exclude it (an explicit jump) */
   reveal: string | null;
+  /** files outside the diff opened from the file finder (or holding local comments), in open order */
+  opened: string[];
+  tree: FileTree | null;
+  finder: boolean;
   checks: Checks | null;
   conv: Conversation | null;
   filter: string;
@@ -150,7 +157,7 @@ const revision = (pr: PrData) => `${pr.baseOid}:${pr.headOid}`;
 export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
-  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, checks: null, conv: null, filter: '', focus: null,
+  expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, opened: [], tree: null, finder: false, checks: null, conv: null, filter: '', focus: null,
   toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
@@ -201,13 +208,31 @@ export function matchesFilter(filter: string, f: PrFile) {
   return filter.toLowerCase().split(/\s+/).filter(Boolean).every(t => p.includes(t));
 }
 
-/** Files shown in the diff stream, in order. */
+/** Files shown in the diff stream, in order: the diff's, then opened files outside it. */
 export function streamFiles(s: State): PrFile[] {
   if (!s.pr) return [];
   const files = s.pr.files.filter(f => f.path === s.reveal ||
     ((s.settings.showHidden || !fileHidden(s, f)) && matchesFocus(s.focus, f) && matchesFilter(s.filter, f)));
-  return sidebarOrder(files, s.settings.grouping);
+  return [...sidebarOrder(files, s.settings.grouping), ...openedFiles(s)];
 }
+
+/** A file outside the diff, shown in full. */
+export const isUnchanged = (f: PrFile) => f.status === 'unchanged';
+const unchangedFiles = new Map<string, PrFile>();
+let openedMemo: { opened: string[]; files: PrFile[] } = { opened: [], files: [] };
+/** Stable PrFile objects for the opened paths (FileBlock is memoized on them). */
+export function openedFiles(s: Pick<State, 'opened'>): PrFile[] {
+  if (openedMemo.opened !== s.opened) {
+    const files = s.opened.map(path => {
+      let f = unchangedFiles.get(path);
+      if (!f) unchangedFiles.set(path, (f = { path, status: 'unchanged', additions: 0, deletions: 0, viewed: 'UNVIEWED' }));
+      return f;
+    });
+    openedMemo = { opened: s.opened, files };
+  }
+  return openedMemo.files;
+}
+const diffPaths = (pr: PrData) => new Set(pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])));
 
 export const isViewed = (v: ViewedState | undefined) => v === 'VIEWED';
 
@@ -327,7 +352,7 @@ export async function load(ref: ReviewRef) {
   for (const [p, v] of book.local) seeded[p] = v;
   set(s => ({
     ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
-    pendingReviewId: null, checks: null, ...(samePr ? {} : { conv: null, current: null, reveal: null }),
+    pendingReviewId: null, checks: null, tree: null, finder: false, ...(samePr ? {} : { conv: null, current: null, reveal: null, opened: [] }),
     blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), outlineOpen: dict(),
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
@@ -408,6 +433,8 @@ function syncLocal() {
   const doc = local.doc();
   const threads = toThreads(doc, s.pr.viewer);
   set({ threads, threadsByPath: byPath(threads), viewed: viewedStates(doc, s.pr.files) });
+  // comments on files outside the diff show in those files
+  if (contentOid(s.pr)) openPaths(threads.map(t => t.path));
 }
 
 async function loadOther(ref: ReviewRef, seq: number, key: string) {
@@ -452,12 +479,15 @@ function applyOther(pr: PrData, seq: number, fromCache: boolean) {
   set(s => ({
     pr, loading: false, revalidating: fromCache,
     current: s.current ?? pr.files[0]?.path ?? null,
-    ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict() }),
+    ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
   }));
   syncLocal();
   if (typeof document !== 'undefined') document.title = `${pr.title} · diff-review`;
   recordRecent();
-  if (!sameRev) void prefetchBlobs(seq);
+  if (!sameRev) {
+    void prefetchBlobs(seq);
+    void fetchOpened(get().opened);
+  }
 }
 
 async function refreshOther(manual: boolean) {
@@ -546,12 +576,15 @@ function applyPr(pr: PrData, seq: number, fromCache: boolean, started: number, e
       pr, loading: false, revalidating: fromCache, viewed, threads, threadsByPath: byPath(threads),
       pendingReviewId: keepLocal ? s.pendingReviewId : pr.pendingReviewId,
       current: s.current ?? pr.files[0]?.path ?? null,
-      ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict() }),
+      ...(sameRev ? {} : { blobs: dict(), bigDiffs: dict(), expansions: dict(), tree: null, opened: outsideDiff(pr, s.opened) }),
     };
   });
   if (typeof document !== 'undefined' && isPr(pr.ref)) document.title = `${pr.title} · #${pr.ref.number}`;
   recordRecent();
-  if (!sameRev) void prefetchBlobs(seq);
+  if (!sameRev) {
+    void prefetchBlobs(seq);
+    void fetchOpened(get().opened);
+  }
 }
 
 const needsHeadBlob = (f: PrFile) => !!f.patch && f.status !== 'added' && f.status !== 'removed';
@@ -629,6 +662,75 @@ export async function loadBigDiff(f: PrFile) {
     result = { error: errText(e) };
   }
   if (stillValid()) set(s => ({ bigDiffs: put(s.bigDiffs, f.path, result) }));
+}
+
+// ---------- files outside the diff ----------
+
+const outsideDiff = (pr: PrData, paths: string[]) => {
+  const inDiff = diffPaths(pr);
+  const out = paths.filter(p => !inDiff.has(p));
+  return out.length === paths.length ? paths : out;
+};
+
+/** Adds paths outside the diff to the opened files and loads them. */
+export function openPaths(paths: string[]) {
+  const s = get();
+  if (!s.pr || !contentOid(s.pr)) return;
+  const known = new Set(s.opened);
+  const inDiff = diffPaths(s.pr);
+  const add = [...new Set(paths)].filter(p => !known.has(p) && !inDiff.has(p));
+  if (!add.length) return;
+  set({ opened: [...s.opened, ...add] });
+  void fetchOpened(add);
+}
+
+export function closeOpened(path: string) {
+  set(s => ({ opened: s.opened.filter(p => p !== path), blobs: drop(s.blobs, path) }));
+}
+
+/** The opened files' contents, from the tree that matches the head for files the diff doesn't touch. */
+async function fetchOpened(paths: string[]) {
+  const pr = get().pr;
+  const oid = pr && contentOid(pr);
+  const fetcher = pr && blobFetcher(pr);
+  if (!pr || !oid || !fetcher || !paths.length) return;
+  const rev = revision(pr);
+  const valid = () => !!get().pr && revision(get().pr!) === rev;
+  set(s => {
+    const blobs = dict(s.blobs);
+    for (const p of paths) blobs[p] = 'loading';
+    return { blobs };
+  });
+  const missing: BlobResult = { text: null, binary: false, truncated: false, missing: true };
+  let res: Map<string, BlobResult> | null = null;
+  try {
+    res = await fetcher(paths.map(path => ({ commit: oid, path })));
+  } catch (e) {
+    console.warn('file fetch failed', e);
+  }
+  if (!valid()) return;
+  set(s => {
+    const blobs = dict(s.blobs);
+    for (const p of paths) if (s.opened.includes(p)) blobs[p] = res?.get(`${oid}:${p}`) ?? missing;
+    return { blobs };
+  });
+}
+
+/** Lists every file at the head once per revision (for the file finder). */
+export async function loadTree() {
+  const pr = get().pr;
+  if (!pr) return;
+  const rev = revision(pr);
+  const t = get().tree;
+  if (t === 'loading' || (t && t.rev === rev && !('error' in t))) return;
+  set({ tree: 'loading' });
+  let tree: FileTree;
+  try {
+    tree = { rev, ...(await listFiles(pr)) };
+  } catch (e) {
+    tree = { rev, error: errText(e) };
+  }
+  if (get().pr && revision(get().pr!) === rev) set({ tree });
 }
 
 let refreshing = false;

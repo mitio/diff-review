@@ -19,6 +19,9 @@ function allowedPath(path: string, diff: boolean): boolean {
   if (/^commits\/[0-9a-f]{7,40}$/i.test(tail)) {
     return query === undefined || /^(?:page|per_page)=\d+(?:&(?:page|per_page)=\d+)*$/.test(query);
   }
+  if (/^git\/trees\/[0-9a-f]{40}$/i.test(tail)) {
+    return !diff && (query === undefined || query === 'recursive=1');
+  }
   if (query !== undefined && !/^[A-Za-z0-9_=&.-]*$/.test(query)) return false;
   if ((diff ? /^pulls\/\d+$/ : /^pulls\/\d+(\/files)?$/).test(tail)) return true;
   const parts = tail.startsWith('compare/') ? tail.slice(8).split('...') : [];
@@ -227,6 +230,20 @@ export function createApp(opts: {
       method('GET'); json(res, 200, { ok: true, name: 'diff-review', version: await version });
     } else if (path === '/api/local/diff') {
       method('GET'); json(res, 200, await localDiff(await repoRoot(url.searchParams.get('repo')), url.searchParams.get('range') ?? ''));
+    } else if (path === '/api/local/files') {
+      method('GET');
+      const rev = url.searchParams.get('rev') ?? '';
+      if (!/^[0-9a-f]{40}$/i.test(rev)) throw new ApiError(400, 'Invalid revision');
+      const root = await repoRoot(url.searchParams.get('repo'));
+      let tree: Buffer;
+      try { tree = await git(root, ['ls-tree', '-r', '-z', '--full-tree', rev]); }
+      catch { throw new ApiError(404, 'Unknown revision'); }
+      const paths: string[] = [];
+      for (const entry of tree.toString('utf8').split('\0')) {
+        const tab = entry.indexOf('\t');
+        if (tab !== -1 && entry.slice(0, tab).split(' ')[1] === 'blob') paths.push(entry.slice(tab + 1));
+      }
+      json(res, 200, { paths });
     } else if (path === '/api/local/blobs') {
       method('POST');
       const input = await body(5 * MB);

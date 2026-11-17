@@ -10,7 +10,7 @@ const gh = vi.hoisted(() => ({
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
 const lr = vi.hoisted(() => ({ opens: 0, adds: 0, loadSource: vi.fn() }));
-vi.mock('../lib/sources.ts', () => ({ loadSource: lr.loadSource, fetchLocalBlobs: async () => new Map() }));
+vi.mock('../lib/sources.ts', () => ({ loadSource: lr.loadSource, fetchLocalBlobs: async () => new Map(), contentOid: () => null, listFiles: async () => ({ paths: [], truncated: false }) }));
 vi.mock('../lib/localstate.ts', () => ({
   LocalReview: class {
     key: string;

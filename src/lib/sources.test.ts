@@ -1,5 +1,6 @@
+import type { PrData, PrFile, ReviewRef } from '../types';
 import { afterEach, expect, test, vi } from 'vitest';
-import { loadCommit, loadCompare, loadLocal, loadPaste, loadSource, fetchLocalBlobs, createPaste } from './sources';
+import { loadCommit, loadCompare, loadLocal, loadPaste, loadSource, fetchLocalBlobs, createPaste, contentOid, listFiles } from './sources';
 const commit = {kind:'commit' as const,owner:'o',repo:'r',sha:'abcdef0'};
 const compare = {kind:'compare' as const,owner:'o',repo:'r',base:'main',head:'feature/x'};
 const patch = '@@ -1 +1 @@\n-old\n+new';
@@ -113,4 +114,43 @@ test('full diff fallback omits JSON pagination parameters', async () => {
     return Response.json({...meta,files:[{...raw(),patch:undefined}]});
   });
   expect((await loadCommit(commit)).files[0].patch).toBe(patch);
+});
+
+function review(ref: ReviewRef, files: PrFile[] = [], headOid = 'b'.repeat(40)): PrData {
+  return {ref, files, headOid, baseOid:'a'.repeat(40), id:'test', title:'Test', url:'', state:'', isDraft:false,
+    author:null, viewer:{login:'you',avatarUrl:''}, baseRefName:'base', headRefName:'head', mergeBaseOid:'a'.repeat(40),
+    additions:0, deletions:0, changedFiles:files.length, threads:[], pendingReviewId:null};
+}
+const file = (path: string, status: PrFile['status'], previousPath?: string): PrFile =>
+  ({path, status, previousPath, additions:0, deletions:0, viewed:'UNVIEWED'});
+
+test('contentOid selects a full head oid or the local worktree base', () => {
+  expect(contentOid(review(commit))).toBe('b'.repeat(40));
+  expect(contentOid(review(commit, [], 'AB'.repeat(20)))).toBe('AB'.repeat(20));
+  expect(contentOid(review(commit, [], 'abcdef0'))).toBeNull();
+  expect(contentOid(review({kind:'local',repo:'/r',range:''}, [], 'worktree:123'))).toBe('a'.repeat(40));
+  expect(contentOid(review({kind:'paste',id:'id'}, [], ''))).toBeNull();
+});
+
+test.each([commit, compare, {kind:'pr' as const,owner:'o',repo:'r',number:1}])('lists GitHub blobs at the head for $kind', async ref => {
+  const fetcher = mock(() => Response.json({tree:[{path:'z',type:'blob'}, {path:'dir',type:'tree'},
+    {path:'sub',type:'commit'}, {path:'a',type:'blob'}, {path:'z',type:'blob'}],truncated:true}));
+  expect(await listFiles(review(ref))).toEqual({paths:['a','z'],truncated:true});
+  expect(fetcher.mock.calls[0][0]).toBe(`/api/rest/repos/o/r/git/trees/${'b'.repeat(40)}?recursive=1`);
+});
+
+test.each(['worktree:123', 'b'.repeat(40)])('lists local files from the correct revision (%s)', async head => {
+  const fetcher = mock(() => Response.json({paths:['old','removed','copy-source','unchanged','unchanged']}));
+  const pr = review({kind:'local',repo:'/a repo',range:''}, [file('new','renamed','old'), file('removed','removed'),
+    file('untracked','added'), file('copy','copied','copy-source'), file('unchanged','modified')], head);
+  expect(await listFiles(pr)).toEqual({paths:['copy','copy-source','new','unchanged','untracked'],truncated:false});
+  expect(fetcher.mock.calls[0][0]).toBe(`/api/local/files?repo=%2Fa%20repo&rev=${head.startsWith('worktree:') ? pr.baseOid : pr.headOid}`);
+});
+
+test('paste listing reconciles only diff paths in code-unit order', async () => {
+  const fetcher = mock(() => { throw new Error('Unexpected request'); });
+  const pr = review({kind:'paste',id:'id'}, [file('z','added'),file('A','modified'),file('a','copied','source'),
+    file('gone','removed'),file('new','renamed','old'),file('z','modified')], '');
+  expect(await listFiles(pr)).toEqual({paths:['A','a','new','z'],truncated:false});
+  expect(fetcher).not.toHaveBeenCalled();
 });

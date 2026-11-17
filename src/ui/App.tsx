@@ -3,7 +3,7 @@ import type { Check, CheckBucket, RecentStatus, ReviewEvent, ReviewRef } from '.
 import { fetchRecentStatus } from '../lib/github.ts';
 import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent.ts';
 import { appPath, githubUrl, isPr, parseReviewInput, prRef, refKey } from '../lib/refs.ts';
-import { createPaste } from '../lib/sources.ts';
+import { contentOid, createPaste } from '../lib/sources.ts';
 import {
   ALL, composing, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
   openCount, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
@@ -16,7 +16,8 @@ import { FileBlock } from './FileDiff.tsx';
 import { ThreadView } from './Thread.tsx';
 import { UserLink, relTime } from './bits.tsx';
 import { setScrollRoot } from './Lazy.tsx';
-import { onMainScroll, scrollToFile, stepFile, toggleViewedCurrent } from './nav.ts';
+import { onMainScroll, openFile, scrollToFile, stepFile, toggleViewedCurrent } from './nav.ts';
+import { Finder, openFinder } from './Finder.tsx';
 
 const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
 
@@ -87,6 +88,7 @@ export function App({ reviewRef: ref }: { reviewRef: ReviewRef }) {
       </div>
       <Toasts />
       <Help />
+      <Finder />
     </div>
   );
 }
@@ -127,11 +129,12 @@ function DiffStream() {
   const threads = useStore(s => s.threads);
   const reveal = useStore(s => s.reveal);
   const grouping = useStore(s => s.settings.grouping);
-  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules, reveal, grouping]);
+  const opened = useStore(s => s.opened);
+  const files = useMemo(() => streamFiles(useStore.getState()), [pr, showHidden, focus, filter, repoRules, prRules, reveal, grouping, opened]);
   const orphans = useMemo(() => {
-    const paths = new Set(pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])));
+    const paths = new Set([...pr.files.flatMap(f => (f.previousPath ? [f.path, f.previousPath] : [f.path])), ...opened]);
     return threads.filter(t => !paths.has(t.path));
-  }, [pr, threads]);
+  }, [pr, threads, opened]);
   const hiddenN = pr.files.filter(f => fileHidden({ repoRules, prRules }, f)).length;
   const pendingFile = useStore(s => s.pendingFile);
   useEffect(() => { onMainScroll(); }, [files]);
@@ -145,8 +148,11 @@ function DiffStream() {
     } else if (pr.files.some(f => f.path === pendingFile)) {
       useStore.setState({ reveal: pendingFile });
     } else if (!useStore.getState().revalidating) {
-      toast(`${pendingFile} is not part of this diff`);
-      useStore.setState({ pendingFile: null });
+      if (contentOid(pr)) openFile(pendingFile);
+      else {
+        toast(`${pendingFile} is not part of this diff`);
+        useStore.setState({ pendingFile: null });
+      }
     }
   }, [files, pendingFile, pr]);
   return (
@@ -187,6 +193,7 @@ function ViewControls({ conversation }: { conversation: boolean }) {
   );
   return (
     <>
+      <button onClick={openFinder} title="Go to any file (T)">Go to file</button>
       <span className="seg">
         {tabBtn('overview', 'Overview', 'o')}
         {tabBtn('diff', 'Diff', 'd')}
@@ -442,6 +449,7 @@ const KEYS: Array<[string, string]> = [
   ['[ / ]', 'less / more context'],
   ['- / =', 'smaller / larger font'],
   ['o / d / t', 'overview / diff / conversation'],
+  ['T', 'go to any file'],
   ['h', 'syntax highlighting on / off'],
   ['/', 'filter files'],
   ['r', 'refresh comments + viewed state'],
@@ -492,9 +500,10 @@ function useKeys() {
         case 'o': useStore.setState({ tab: 'overview' }); break;
         case 'd': useStore.setState({ tab: 'diff' }); break;
         case 't': if (isPr(s.ref)) useStore.setState({ tab: 'conversation' }); break;
+        case 'T': openFinder(); break;
         case 'h': updateSettings({ highlight: !st.highlight }); break;
         case 'r': void refresh(true); break;
-        case 'c': if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
+        case 'c': if (s.current && !isLocalReview(s) && !s.pr?.files.some(f => f.path === s.current)) toast("GitHub takes comments only on the PR's files."); else if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
         case '/': e.preventDefault(); document.getElementById('file-filter')?.focus(); break;
         case '?': useStore.setState({ help: !s.help }); break;
         case 'Escape': useStore.setState({ help: false }); break;

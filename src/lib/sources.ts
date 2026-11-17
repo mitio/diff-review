@@ -128,3 +128,32 @@ export async function fetchLocalBlobs(repo: string, specs: BlobSpec[]): Promise<
 export async function createPaste(diff: string): Promise<string> {
   return (await local<{id: string}>('paste', {method:'POST',body:{diff}})).id;
 }
+
+/** The revision containing unchanged files, or null for a paste. */
+export function contentOid(pr: PrData): string | null {
+  if (/^[0-9a-f]{40}$/i.test(pr.headOid)) return pr.headOid;
+  if (pr.ref.kind === 'local' && pr.headOid.startsWith('worktree:')) return pr.baseOid;
+  return null;
+}
+
+/** Sorted head paths; truncated means the tree listing is incomplete. */
+export async function listFiles(pr: PrData): Promise<{ paths: string[]; truncated: boolean }> {
+  let paths: string[] = [];
+  let truncated = false;
+  const ref = pr.ref;
+  if (ref.kind === 'local') {
+    ({paths} = await local<{paths: string[]}>(`local/files?repo=${encodeURIComponent(ref.repo)}&rev=${contentOid(pr)}`));
+  } else if (ref.kind !== 'paste') {
+    const {data} = await rest<{tree: Array<{path: string; type: string}>; truncated: boolean}>(
+      `repos/${ref.owner}/${ref.repo}/git/trees/${pr.headOid}?recursive=1`);
+    paths = data.tree.filter(entry => entry.type === 'blob').map(entry => entry.path);
+    truncated = data.truncated;
+  }
+  const result = new Set(paths);
+  for (const file of pr.files) {
+    if (file.status === 'removed') result.delete(file.path);
+    if (file.status === 'renamed' && file.previousPath) result.delete(file.previousPath);
+  }
+  for (const file of pr.files) if (file.status !== 'removed') result.add(file.path);
+  return {paths: [...result].sort((a, b) => a < b ? -1 : a > b ? 1 : 0), truncated};
+}
