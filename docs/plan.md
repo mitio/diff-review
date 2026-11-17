@@ -642,3 +642,16 @@ Pass 1, 7 findings:
    move keeps the same fingerprint.
 6. Untracked files over 5 MB had no content identity; their placeholder now carries `git hash-object`'s oid.
 7. `diff.mnemonicPrefix` / `diff.noprefix` / `diff.relative` changed paths; diffs force `a/`/`b/` and `--no-relative`.
+
+Pass 2, 6 findings, all fixed:
+1. A file changing and changing back between the diff and the snapshot (A→B→A) passed the two-diff check. Replaced by
+   a content check: a snapshotted file is served only if its git blob id is one the diff's `index` lines name.
+   With CRLF/filter normalisation the ids differ, so those files stay on the patch view (the known limit above).
+2. A save racing another tab's save (or a revisit before `reload()` finished) got a 409 and dropped the comment. A 409
+   now replays the pending ops on the other writer's version (≤ 3 times); only an op that no longer applies fails.
+3. A refresh could move an open line comment's target under it. Focus refresh skips while a comment box is open; a
+   manual refresh that changes the diff closes line comment boxes (drafts stay in localStorage).
+4. A refresh started during a cached first paint could install its older diff over the newer load; it now re-checks
+   the data generation after reloading state.
+5. Large untracked placeholders now carry the real file mode.
+6. The two-diff check doubled the untracked `git diff --no-index` processes (17 s for 300 files); gone with 1.

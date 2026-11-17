@@ -5,7 +5,7 @@ import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent
 import { appPath, githubUrl, isPr, parseReviewInput, prRef, refKey } from '../lib/refs.ts';
 import { createPaste } from '../lib/sources.ts';
 import {
-  ALL, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
+  ALL, composing, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
   openCount, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
@@ -47,6 +47,7 @@ export function App({ reviewRef: ref }: { reviewRef: ReviewRef }) {
     const onFocus = () => {
       // a local diff changes as you (or an agent) edit, so it refreshes more eagerly
       if (Date.now() - last < (isLocalReview(useStore.getState()) ? 5_000 : 30_000)) return;
+      if (isLocalReview(useStore.getState()) && composing()) return;
       last = Date.now();
       void refresh();
     };

@@ -398,7 +398,7 @@ function attachLocal(lr: LocalReview) {
   unsubLocal = lr.onReplace((_doc, reason) => {
     if (local !== lr) return;
     syncLocal();
-    toast(reason, true);
+    if (reason) toast(reason, true);
   });
 }
 /** Threads and viewed state from the local review's doc (its pending writes included). */
@@ -440,6 +440,15 @@ function applyOther(pr: PrData, seq: number, fromCache: boolean) {
   const prev = get().pr;
   const sameRev = !!prev && revision(prev) === revision(pr);
   dataGen++;
+  // a line comment being written points at lines of the old diff; its draft text is kept
+  const open = get().composers;
+  const lineDrafts = Object.keys(open).filter(p => open[p].kind === 'line');
+  if (prev && !sameRev && lineDrafts.length) {
+    const composers = dict(open);
+    for (const p of lineDrafts) delete composers[p];
+    set({ composers, selAnchor: null, dragSel: null });
+    toast('The diff changed, so the open line comment was closed. Opening a comment on the same lines again restores its draft.');
+  }
   set(s => ({
     pr, loading: false, revalidating: fromCache,
     current: s.current ?? pr.files[0]?.path ?? null,
@@ -459,11 +468,14 @@ async function refreshOther(manual: boolean) {
   if (ls !== loadSeq || gen !== dataGen) return;
   // pick up comments written in another tab
   await local?.reload().catch(() => false);
-  if (ls !== loadSeq) return;
+  if (ls !== loadSeq || gen !== dataGen) return;
   applyOther(pr, ls, false);
   void putPr(refKey(ref), pr);
   if (manual) toast('Refreshed');
 }
+
+/** An open comment box pins the lines it targets; refreshing on focus would move them under it. */
+export const composing = () => Object.keys(get().composers).length > 0;
 
 /** Wraps a local write for the "saving…" indicator; failures already replaced the state (onReplace). */
 async function localWrite<T>(p: Promise<T>): Promise<T | undefined> {

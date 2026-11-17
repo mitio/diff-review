@@ -27,7 +27,7 @@ vi.mock('../lib/localstate.ts', () => ({
 }));
 
 import { listRecent } from '../lib/recent.ts';
-import { createThread, load, markViewed, postComment, refresh, removeComment, useStore } from './store.ts';
+import { createThread, load, markViewed, openComposer, postComment, refresh, removeComment, useStore } from './store.ts';
 
 const mem = new Map<string, string>();
 globalThis.localStorage = {
@@ -358,4 +358,35 @@ test('leaving a local review and coming back keeps one writer for it', async () 
   expect(await createThread({ path: 'a.ts', body: 'y', subjectType: 'FILE' })).toBe(true);
   expect(lr.opens).toBe(1);
   expect(lr.adds).toBe(2);
+});
+
+test('a local refresh that changes the diff closes open line comments, keeps file comments', async () => {
+  const localRef = { kind: 'local' as const, repo: '/r2', range: '' };
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r2:', headOid: 'worktree:1' }));
+  await load(localRef);
+  await flush();
+  openComposer('a.ts', { kind: 'line', a: { side: 'RIGHT', line: 1 }, b: { side: 'RIGHT', line: 1 } });
+  openComposer('constructor', { kind: 'file' });
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r2:', headOid: 'worktree:2' }));
+  await refresh(true);
+  await flush();
+  expect(useStore.getState().pr?.headOid).toBe('worktree:2');
+  expect(Object.keys(useStore.getState().composers)).toEqual(['constructor']);
+});
+
+test('a local refresh started before a newer load finished does not install its older diff', async () => {
+  const localRef = { kind: 'local' as const, repo: '/r3', range: '' };
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r3:', headOid: 'worktree:1' }));
+  await load(localRef);
+  await flush();
+  const old = deferred<PrData>();
+  lr.loadSource.mockReturnValueOnce(old.promise);
+  const refreshing = refresh();
+  lr.loadSource.mockImplementation(async (r: unknown) => pr({ ref: r as PrData['ref'], id: 'local:/r3:', headOid: 'worktree:3' }));
+  await load(localRef);
+  await flush();
+  old.resolve(pr({ ref: localRef, id: 'local:/r3:', headOid: 'worktree:2' }));
+  await refreshing;
+  await flush();
+  expect(useStore.getState().pr?.headOid).toBe('worktree:3');
 });

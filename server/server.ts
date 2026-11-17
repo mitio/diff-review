@@ -63,7 +63,9 @@ async function revision(root: string, rev: string): Promise<string> {
   try { return (await git(root, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`])).toString().trim(); }
   catch { throw new ApiError(400, 'Invalid revision'); }
 }
-async function diskBlob(root: string, path: string, budget: number): Promise<{ result: BlobResult; bytes: number }> {
+/** The id git gives a blob with this content (no filters applied). */
+const gitBlobOid = (data: Buffer) => createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
+async function diskBlob(root: string, path: string, budget: number): Promise<{ result: BlobResult; bytes: number; raw?: Buffer }> {
   try {
     const actual = await realpath(resolve(root, path));
     if (!actual.startsWith(root + sep) || actual === join(root, '.git') || actual.startsWith(join(root, '.git') + sep)) return { result: missingBlob(), bytes: 0 };
@@ -72,7 +74,7 @@ async function diskBlob(root: string, path: string, budget: number): Promise<{ r
     if (info.size > Math.min(5 * MB, budget)) return { result: truncatedBlob(), bytes: 0 };
     const data = await readFile(actual);
     if (data.length > budget) return { result: truncatedBlob(), bytes: 0 };
-    return { result: blob(data), bytes: data.length };
+    return { result: blob(data), bytes: data.length, raw: data };
   } catch { return { result: missingBlob(), bytes: 0 }; }
 }
 const MIME: Record<string, string> = {
@@ -182,7 +184,8 @@ export function createApp(opts: {
         if (info.size > 5 * MB) {
           // the content's oid makes a replaced large file a different change
           const oid = (await git(root, ['hash-object', '--', path])).toString().trim();
-          diff += `diff --git ${quoted(a)} ${quoted(b)}\nnew file mode 100644\nindex ${'0'.repeat(40)}..${oid}\nBinary files /dev/null and ${quoted(b)} differ\n`;
+          const mode = info.mode & 0o111 ? '100755' : '100644';
+          diff += `diff --git ${quoted(a)} ${quoted(b)}\nnew file mode ${mode}\nindex ${'0'.repeat(40)}..${oid}\nBinary files /dev/null and ${quoted(b)} differ\n`;
         } else {
           let added = (await git(root, [...DIFF, '--full-index', '--no-index', '--', '/dev/null', path], true)).toString();
           const newline = added.indexOf('\n');
@@ -192,22 +195,19 @@ export function createApp(opts: {
       }
       return { diff, targets };
     };
-    let { diff, targets } = await build();
+    const { diff, targets } = await build();
     if (!right) {
-      // The snapshot must show the same content the diff was made from: take it between two identical diffs.
-      let snapshot = new Map<string, BlobResult>();
-      for (let attempt = 0; ; attempt++) {
-        snapshot = new Map();
-        let bytes = 0;
-        for (const path of targets) {
-          const entry = await diskBlob(root, path, 64 * MB - bytes);
-          bytes += entry.bytes; snapshot.set(path, entry.result);
-        }
-        const again = await build();
-        if (again.diff === diff) break;
-        diff = again.diff; targets = again.targets;
-        // still changing (an agent is writing): no contents, so the files stay on the patch view
-        if (attempt === 2) { snapshot = new Map(); break; }
+      // A file read after the diff may have changed since. Keep only contents whose blob id is one the diff names;
+      // the others stay on the patch view.
+      const oids = new Set([...diff.matchAll(/^index [0-9a-f]+\.\.([0-9a-f]{40})/gm)].map(m => m[1]));
+      const snapshot = new Map<string, BlobResult>();
+      let bytes = 0;
+      for (const path of targets) {
+        const entry = await diskBlob(root, path, 64 * MB - bytes);
+        let result = entry.result;
+        if (entry.raw && !oids.has(gitBlobOid(entry.raw))) result = missingBlob();
+        else bytes += entry.bytes;
+        snapshot.set(path, result);
       }
       const headOid = `worktree:${hash(diff).slice(0, 16)}`;
       const key = `${root}\0${headOid}`;

@@ -16,6 +16,7 @@ export class LocalReview {
   private timer?: ReturnType<typeof setTimeout>;
   private writing = false;
   private recovering: Error | null = null;
+  private rebases = 0;
   private waiters: Waiter[] = [];
   private listeners = new Set<(doc: ReviewDoc, reason: string) => void>();
 
@@ -66,9 +67,11 @@ export class LocalReview {
     try {
       const {version} = await local<{version: number}>(statePath(this.key), {method:'PUT',body:{doc:sent,baseVersion:this.acknowledged.version}});
       this.acknowledged = {...sent,version};
+      this.rebases = 0;
       const completed = this.flight; this.flight = [];
       for (const op of completed) op.resolve();
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && this.rebases < 3 && await this.rebase()) return;
       const reason = error instanceof ApiError && error.status === 409 ? 'Changed elsewhere; reloaded' : `Save failed: ${error instanceof Error ? error.message : String(error)}`;
       const failure = new Error(reason); this.recovering = failure;
       if (this.timer !== undefined) { clearTimeout(this.timer); this.timer = undefined; }
@@ -90,6 +93,26 @@ export class LocalReview {
         else this.schedule();
       } else for (const waiter of this.waiters.splice(0)) waiter.resolve();
     }
+  }
+
+  /**
+   * Another writer (another tab) saved first: replay our ops on top of its version. Ops are functions of the doc, so
+   * only one that no longer applies (its thread was deleted there) fails. Listeners get reason '' (nothing lost).
+   */
+  private async rebase(): Promise<boolean> {
+    let server: ReviewDoc;
+    try { server = await local<ReviewDoc>(statePath(this.key)); }
+    catch { return false; }
+    this.rebases++;
+    this.acknowledged = server;
+    const replay = [...this.flight, ...this.pending];
+    this.flight = []; this.pending = [];
+    for (const op of replay) {
+      try { op.apply(this.doc()); this.pending.push(op); }
+      catch (error) { op.reject(error instanceof Error ? error : new Error(String(error))); }
+    }
+    for (const listener of this.listeners) listener(this.doc(), '');
+    return true;
   }
 
   addThread(t: NewThread): Promise<LocalThread> {

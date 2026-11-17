@@ -78,7 +78,7 @@ test('ops during a PUT wait for the next PUT and settle separately', async () =>
   expect(requests[1].baseVersion).toBe(1);
 });
 
-test.each([409,500])('failed PUT %s drops all ops, refetches and replaces state', async status => {
+test.each([500])('failed PUT %s drops all ops, refetches and replaces state', async status => {
   let reads = 0;
   const external = {...empty(),version:7,title:'elsewhere',viewed:{remote:'fp'}};
   let finish!: (response: Response) => void;
@@ -175,4 +175,25 @@ test('reload only moves forward and never while writes are pending', async () =>
   await vi.advanceTimersByTimeAsync(400);
   await review.flush();
   expect(review.doc().version).toBe(6);
+});
+
+test('a 409 replays pending ops on the other writer\'s version; only ops that no longer apply fail', async () => {
+  const other = {...empty(),version:3,title:'elsewhere',threads:[]};
+  const puts: any[] = [];
+  let reads = 0;
+  vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+    if (init?.method !== 'PUT') return Response.json(++reads === 1 ? empty() : other);
+    const body = JSON.parse(String(init.body)); puts.push(body);
+    return puts.length === 1 ? Response.json({doc:other}, {status:409}) : Response.json({version:body.baseVersion + 1});
+  });
+  const review = await LocalReview.open(ref,'title'); const replaced = vi.fn();
+  review.onReplace(replaced);
+  const p = review.addThread(input).catch(e => e); await vi.advanceTimersByTimeAsync(1000); const thread = await p;
+  expect(thread).not.toBeInstanceOf(Error);
+  expect(puts).toHaveLength(2);
+  expect(puts[1].baseVersion).toBe(3);
+  expect(puts[1].doc.title).toBe('elsewhere');
+  expect(puts[1].doc.threads).toHaveLength(1);
+  expect(review.doc().version).toBe(4);
+  expect(replaced).toHaveBeenCalledWith(expect.anything(), '');
 });

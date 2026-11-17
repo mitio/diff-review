@@ -402,3 +402,25 @@ it('ignores prefix config and gives large untracked files a content identity', a
     expect(second.diff).toMatch(/^index 0{40}\.\.[0-9a-f]{40}$/m);
   } finally { await rm(repo, { recursive: true, force: true }); }
 });
+it('serves only snapshot contents the diff describes, and large untracked files carry their mode', async () => {
+  const { repo, git } = await gitRepo();
+  try {
+    const get = await start();
+    await writeFile(join(repo, 'x'), 'one\n'); await git('add', '.'); await git('commit', '-m', 'x');
+    await writeFile(join(repo, 'x'), 'two\n');
+    await git('config', 'core.autocrlf', 'true');
+    await writeFile(join(repo, 'crlf'), 'a\r\n');
+    const big = join(repo, 'big.bin');
+    await writeFile(big, Buffer.alloc(6 * 1024 * 1024, 1));
+    const diff = async () => JSON.parse((await get(`/api/local/diff?${new URLSearchParams({ repo, range: '' })}`, { headers: api })).body);
+    const first = await diff();
+    const blobs = JSON.parse((await get('/api/local/blobs', { method: 'POST', headers: api, body: JSON.stringify({ repo, specs: [{ commit: first.headOid, path: 'x' }, { commit: first.headOid, path: 'crlf' }] }) })).body);
+    expect(blobs[`${first.headOid}:x`].text).toBe('two\n');
+    // git normalises CRLF before hashing, so the raw file is not what the diff describes: no contents for it
+    expect(blobs[`${first.headOid}:crlf`].missing).toBe(true);
+    await exec('chmod', ['+x', big]);
+    const second = await diff();
+    expect(second.headOid).not.toBe(first.headOid);
+    expect(second.diff).toContain('new file mode 100755');
+  } finally { await rm(repo, { recursive: true, force: true }); }
+});
