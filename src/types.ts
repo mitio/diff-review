@@ -28,6 +28,10 @@ export interface PrFile {
   fingerprint?: string;
 }
 
+export type ReactionContent = 'THUMBS_UP' | 'THUMBS_DOWN' | 'LAUGH' | 'HOORAY' | 'CONFUSED' | 'HEART' | 'ROCKET' | 'EYES';
+/** A reaction with at least one reactor; absent where GitHub takes none (pending, local). */
+export interface Reaction { content: ReactionContent; count: number; viewerHasReacted: boolean }
+
 export interface Comment {
   id: string;
   databaseId?: number;
@@ -40,6 +44,8 @@ export interface Comment {
   viewerCanUpdate: boolean;
   viewerCanDelete: boolean;
   reviewId?: string;
+  reactions?: Reaction[];
+  canReact?: boolean;
 }
 
 export interface Thread {
@@ -198,6 +204,8 @@ export interface IssueComment {
   url: string;
   viewerCanUpdate: boolean;
   viewerCanDelete: boolean;
+  reactions?: Reaction[];
+  canReact?: boolean;
 }
 export interface ReviewSummary {
   id: string;
@@ -207,9 +215,14 @@ export interface ReviewSummary {
   submittedAt: string;
   author: User | null;
   url: string;
+  reactions?: Reaction[];
+  canReact?: boolean;
 }
 export interface Conversation {
   body: string;
+  /** on the PR description */
+  reactions?: Reaction[];
+  canReact?: boolean;
   bodyHTML: string;
   createdAt: string;
   comments: IssueComment[];

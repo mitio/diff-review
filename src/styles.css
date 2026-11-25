@@ -320,6 +320,13 @@ button.pending-review { background: var(--warn-bg); border-color: var(--pending)
 .emoji-opt { display: flex; gap: 8px; align-items: center; height: 26px; padding: 0 8px; border-radius: 4px; cursor: pointer; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .emoji-opt.on { background: var(--accent-soft); color: var(--accent); }
 .emoji-opt .emoji { font-size: 16px; width: 20px; text-align: center; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+button.reaction { padding: 1px 8px; border-radius: 12px; font-size: 12px; }
+button.reaction.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.popover.reaction-pick { position: fixed; z-index: 50; width: auto; padding: 4px; display: flex; gap: 2px; }
+.popover.reaction-pick button { border: 1px solid transparent; background: none; font-size: 18px; padding: 2px 6px; border-radius: 6px; }
+.popover.reaction-pick button:hover { background: var(--bg-soft); }
+.popover.reaction-pick button.on { background: var(--accent-soft); border-color: var(--accent); }
 .popover h3 { margin: 0 0 6px; font-size: 13px; }
 .popover .opts { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
 .popover .opts label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }

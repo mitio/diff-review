@@ -1,19 +1,26 @@
-import type { BlobResult, BlobSpec, Check, CheckBucket, Checks, Comment, Conversation, IssueComment, NewThread, PrData, PrFile, PrRef, RecentStatus, RefreshResult, ReviewEvent, ReviewSummary, Thread, ViewedState } from '../types';
+import type { BlobResult, Reaction, ReactionContent, BlobSpec, Check, CheckBucket, Checks, Comment, Conversation, IssueComment, NewThread, PrData, PrFile, PrRef, RecentStatus, RefreshResult, ReviewEvent, ReviewSummary, Thread, ViewedState } from '../types';
 import { gql, rest, restText } from './api';
 import { splitUnifiedDiff } from './diff';
 import * as cache from './cache';
 
 const PAGE = 'pageInfo { hasNextPage endCursor }';
-const COMMENT = 'id databaseId body bodyHTML createdAt author { login avatarUrl } state url viewerCanUpdate viewerCanDelete pullRequestReview { id }';
+/** counts only: reactor lists would multiply the node count of a whole PR */
+const REACTIONS = 'viewerCanReact reactionGroups { content viewerHasReacted reactors { totalCount } }';
+const COMMENT = `id databaseId body bodyHTML createdAt author { login avatarUrl } state url viewerCanUpdate viewerCanDelete pullRequestReview { id } ${REACTIONS}`;
 const THREAD = `id path line startLine originalLine diffSide startDiffSide isResolved isOutdated subjectType viewerCanResolve viewerCanUnresolve viewerCanReply comments(first:100) { nodes { ${COMMENT} } ${PAGE} }`;
 const CONNECTIONS = `files(first:100, after:$filesAfter) { nodes { path additions deletions viewerViewedState } ${PAGE} } reviewThreads(first:100, after:$threadsAfter) { nodes { ${THREAD} } ${PAGE} } reviews(states:PENDING,first:20) { nodes { id author { login } } }`;
 const META = 'id number title url state isDraft author { login avatarUrl } baseRefName headRefName baseRefOid headRefOid changedFiles additions deletions';
 const PR_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$filesAfter:String,$threadsAfter:String) { viewer { login avatarUrl } repository(owner:$owner,name:$repo) { pullRequest(number:$number) { ${META} ${CONNECTIONS} } } }`;
 type Raw = Record<string, any>;
 const vars = (ref: PrRef) => ({owner:ref.owner,repo:ref.repo,number:ref.number});
+function reactions(groups: Raw[] | null | undefined): Reaction[] {
+  return (groups ?? []).filter(g => g.reactors.totalCount > 0).map(g => ({content:g.content,count:g.reactors.totalCount,viewerHasReacted:g.viewerHasReacted}));
+}
+/** GitHub takes no reactions on pending comments. */
+const reactable = ({reactionGroups, viewerCanReact}: Raw, pending = false) => (pending ? {} : {reactions:reactions(reactionGroups),canReact:!!viewerCanReact});
 function comment(c: Raw): Comment {
-  const {pullRequestReview, ...fields} = c;
-  return {...fields,author:c.author ?? null, ...(pullRequestReview?.id ? {reviewId:pullRequestReview.id} : {})} as Comment;
+  const {pullRequestReview, reactionGroups, viewerCanReact, ...fields} = c;
+  return {...fields,author:c.author ?? null, ...(pullRequestReview?.id ? {reviewId:pullRequestReview.id} : {}), ...reactable(c, c.state === 'PENDING')} as Comment;
 }
 function thread(t: Raw): Thread {
   const {diffSide,startDiffSide,comments,...fields} = t;
@@ -220,13 +227,13 @@ export async function fetchChecks(ref: PrRef): Promise<Checks> {
   return {oid,state,checks,total,counts};
 }
 
-const ISSUE_COMMENT = 'id body bodyHTML createdAt author { login avatarUrl } url viewerCanUpdate viewerCanDelete';
-const REVIEW = 'id state body bodyHTML submittedAt author { login avatarUrl } url';
-const issueComment = (c: Raw): IssueComment => ({...c,author:c.author ?? null} as IssueComment);
-const review = (r: Raw): ReviewSummary => ({...r,author:r.author ?? null} as ReviewSummary);
+const ISSUE_COMMENT = `id body bodyHTML createdAt author { login avatarUrl } url viewerCanUpdate viewerCanDelete ${REACTIONS}`;
+const REVIEW = `id state body bodyHTML submittedAt author { login avatarUrl } url ${REACTIONS}`;
+const issueComment = ({reactionGroups, viewerCanReact, ...c}: Raw): IssueComment => ({...c,author:c.author ?? null,...reactable({reactionGroups,viewerCanReact})} as IssueComment);
+const review = ({reactionGroups, viewerCanReact, ...r}: Raw): ReviewSummary => ({...r,author:r.author ?? null,...reactable({reactionGroups,viewerCanReact})} as ReviewSummary);
 /** Newest first: up to 10 pages each of comments and reviews; `truncated` when older ones exist. */
 export async function fetchConversation(ref: PrRef): Promise<Conversation> {
-  const q = (comments: boolean, reviews: boolean) => `query($owner:String!,$repo:String!,$number:Int!${comments ? ',$cb:String' : ''}${reviews ? ',$rb:String' : ''}) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { body bodyHTML createdAt ${comments ? `comments(last:100,before:$cb) { nodes { ${ISSUE_COMMENT} } pageInfo { hasPreviousPage startCursor } }` : ''} ${reviews ? `reviews(last:100,before:$rb,states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]) { nodes { ${REVIEW} } pageInfo { hasPreviousPage startCursor } }` : ''} } } }`;
+  const q = (comments: boolean, reviews: boolean) => `query($owner:String!,$repo:String!,$number:Int!${comments ? ',$cb:String' : ''}${reviews ? ',$rb:String' : ''}) { repository(owner:$owner,name:$repo) { pullRequest(number:$number) { body bodyHTML createdAt ${REACTIONS} ${comments ? `comments(last:100,before:$cb) { nodes { ${ISSUE_COMMENT} } pageInfo { hasPreviousPage startCursor } }` : ''} ${reviews ? `reviews(last:100,before:$rb,states:[APPROVED,CHANGES_REQUESTED,COMMENTED,DISMISSED]) { nodes { ${REVIEW} } pageInfo { hasPreviousPage startCursor } }` : ''} } } }`;
   const {data} = await gql<Raw>(q(true,true),vars(ref));
   const pr = data.repository?.pullRequest;
   if (!pr) throw new Error('Pull request not found');
@@ -238,7 +245,19 @@ export async function fetchConversation(ref: PrRef): Promise<Conversation> {
     if (p.comments) { comments = [...p.comments.nodes,...comments]; ci = p.comments.pageInfo; }
     if (p.reviews) { reviews = [...p.reviews.nodes,...reviews]; ri = p.reviews.pageInfo; }
   }
-  return {body:pr.body,bodyHTML:pr.bodyHTML,createdAt:pr.createdAt,comments:comments.map(issueComment),reviews:reviews.map(review),truncated:!!(ci.hasPreviousPage || ri.hasPreviousPage)};
+  return {body:pr.body,bodyHTML:pr.bodyHTML,createdAt:pr.createdAt,...reactable(pr),comments:comments.map(issueComment),reviews:reviews.map(review),truncated:!!(ci.hasPreviousPage || ri.hasPreviousPage)};
+}
+/** Adds or removes the viewer's reaction; returns the subject's reactions after the change. */
+export async function setReaction(subjectId: string, content: ReactionContent, on: boolean): Promise<Reaction[]> {
+  const m = on ? 'addReaction' : 'removeReaction';
+  const {data} = await gql<Raw>(`mutation($input:${on ? 'AddReactionInput' : 'RemoveReactionInput'}!) { ${m}(input:$input) { subject { ${REACTIONS} } } }`,{input:{subjectId,content}});
+  return reactions(data[m].subject.reactionGroups);
+}
+/** Who reacted, per reaction (up to 20 each), for a tooltip. */
+export async function fetchReactors(subjectId: string): Promise<Partial<Record<ReactionContent,{logins:string[];total:number}>>> {
+  const who = '... on User { login } ... on Bot { login } ... on Organization { login } ... on Mannequin { login }';
+  const {data} = await gql<Raw>(`query($id:ID!) { node(id:$id) { ... on Reactable { reactionGroups { content reactors(first:20) { totalCount nodes { ${who} } } } } } }`,{id:subjectId});
+  return Object.fromEntries((data.node?.reactionGroups ?? []).map((g: Raw) => [g.content,{logins:g.reactors.nodes.map((n: Raw) => n.login).filter(Boolean),total:g.reactors.totalCount}]));
 }
 export async function addIssueComment(subjectId: string, body: string): Promise<IssueComment> {
   const {data} = await gql<Raw>(`mutation($input:AddCommentInput!) { addComment(input:$input) { commentEdge { node { ${ISSUE_COMMENT} } } } }`,{input:{subjectId,body}});

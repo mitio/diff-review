@@ -45,6 +45,7 @@ The CLI starts the server if it isn't running (log: `~/.local/state/diff-review/
   comments inside its own diff hunks; clicking a line outside them starts a file comment that quotes the line.
 - **Conversation** (`m` cycles Diff → Overview → Conversation): the PR description, top-level comments and review summaries. Comments posted there go out
   immediately, separately from your draft review.
+- **Reactions** on comments, review summaries and the description, as on GitHub (not on pending comments).
 - **Viewed** state syncs with GitHub. **Hide** is local: per file, folder, category or glob (Overview → Hidden rules).
   Folder, category and glob rules apply to every PR in the repo.
 - **Overview**: files grouped by category and by folder, with churn, viewed progress and bulk actions.

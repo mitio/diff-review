@@ -3,6 +3,7 @@ import type { IssueComment, ReviewSummary } from '../types.ts';
 import { editIssueComment, postComment, removeIssueComment, useStore } from './store.ts';
 import { Body, Editor } from './Thread.tsx';
 import { UserLink, relTime } from './bits.tsx';
+import { AddReaction, ReactionChips } from './Reactions.tsx';
 
 type Item = { kind: 'comment'; at: string; c: IssueComment } | { kind: 'review'; at: string; r: ReviewSummary };
 
@@ -28,8 +29,13 @@ export function Conversation() {
         <div className="thead">
           <UserLink user={pr.author} />
           <span className="faint" title={conv.createdAt}>opened {relTime(conv.createdAt)}</span>
+          <span className="spacer" />
+          <AddReaction subjectId={pr.id} reactions={conv.reactions} canReact={conv.canReact} />
         </div>
-        <div className="comment">{conv.body.trim() ? <Body c={conv} /> : <div className="faint">No description.</div>}</div>
+        <div className="comment">
+          {conv.body.trim() ? <Body c={conv} /> : <div className="faint">No description.</div>}
+          <ReactionChips subjectId={pr.id} reactions={conv.reactions} />
+        </div>
       </div>
       {conv.truncated && (
         <div className="faint">
@@ -59,8 +65,10 @@ function ReviewView({ r }: { r: ReviewSummary }) {
         <UserLink user={r.author} />
         <span className={`chip review-${r.state}`}>{REVIEW_LABEL[r.state] ?? r.state.toLowerCase()}</span>
         <a className="faint" href={r.url} target="_blank" rel="noreferrer" title={r.submittedAt}>{relTime(r.submittedAt)}</a>
+        <span className="spacer" />
+        {r.body.trim() && <AddReaction subjectId={r.id} reactions={r.reactions} canReact={r.canReact} />}
       </div>
-      {r.body.trim() && <div className="comment"><Body c={r} /></div>}
+      {r.body.trim() && <div className="comment"><Body c={r} /><ReactionChips subjectId={r.id} reactions={r.reactions} /></div>}
     </div>
   );
 }
@@ -78,6 +86,7 @@ function IssueCommentView({ c }: { c: IssueComment }) {
           <span className="faint">{tmp ? 'posting…' : relTime(c.createdAt)}</span>
         )}
         <span className="spacer" />
+        {!tmp && <AddReaction subjectId={c.id} reactions={c.reactions} canReact={c.canReact} />}
         {c.viewerCanUpdate && !editing && <button className="small" onClick={() => setEditing(true)}>Edit</button>}
         {c.viewerCanDelete && !editing && (
           <button className="small danger" onClick={() => { if (confirm('Delete this comment?')) void removeIssueComment(c.id); }}>
@@ -99,7 +108,10 @@ function IssueCommentView({ c }: { c: IssueComment }) {
             onCancel={() => setEditing(false)}
           />
         ) : (
-          <Body c={c} />
+          <>
+            <Body c={c} />
+            <ReactionChips subjectId={c.id} reactions={c.reactions} />
+          </>
         )}
       </div>
     </div>

@@ -5,6 +5,7 @@ import { createThread, draftKey, editComment, isLocalReview, pendingIn, removeCo
 import { UserLink, relTime } from './bits.tsx';
 import { plainBodyHtml } from '../lib/mdcode.ts';
 import { EmojiTextarea } from './EmojiTextarea.tsx';
+import { AddReaction, ReactionChips } from './Reactions.tsx';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
   if (node.tagName === 'A') {
@@ -155,6 +156,7 @@ function CommentView({ c, path }: { c: Comment; path: string }) {
         )}
         {c.state === 'PENDING' && <span className="chip pending" title="Only you can see this until you finish your review">Pending</span>}
         <span className="spacer" />
+        {!tmp && <AddReaction subjectId={c.id} reactions={c.reactions} canReact={c.canReact} />}
         {c.viewerCanUpdate && !editing && <button className="small" onClick={() => setEditing(true)}>Edit</button>}
         {c.viewerCanDelete && !editing && (
           <button className="small danger" onClick={() => { if (confirm('Delete this comment?')) void removeComment(c.id); }}>
@@ -175,7 +177,10 @@ function CommentView({ c, path }: { c: Comment; path: string }) {
           onCancel={() => setEditing(false)}
         />
       ) : (
-        <Body c={c} path={path} />
+        <>
+          <Body c={c} path={path} />
+          <ReactionChips subjectId={c.id} reactions={c.reactions} />
+        </>
       )}
     </div>
   );

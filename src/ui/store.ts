@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import type {
-  BlobResult, BlobSpec, Category, Checks, Comment, Conversation, HideRule, IssueComment, NewThread, PrData, PrFile, ReviewEvent,
+  BlobResult, BlobSpec, Category, Checks, Comment, Conversation, HideRule, IssueComment, NewThread, PrData, PrFile, Reaction, ReactionContent, ReviewEvent,
   ReviewRef, Row, Thread, ViewedState,
 } from '../types.ts';
 import {
   addIssueComment, addThread, currentOids, deleteComment, deleteIssueComment, discardReview, ensurePendingReview, fetchBlobs,
-  fetchChecks, fetchConversation, fetchPatches, loadPr, refreshPr, replyThread, resolveThread, setViewed, submitReview,
+  fetchChecks, fetchConversation, fetchPatches, loadPr, refreshPr, replyThread, resolveThread, setReaction, setViewed, submitReview,
   updateComment, updateIssueComment,
 } from '../lib/github.ts';
 import { touchRecent, updateRecent, type RecentPr } from '../lib/recent.ts';
@@ -16,6 +16,7 @@ import { ghRepo, isPr, prRef, refKey } from '../lib/refs.ts';
 import { contentOid, fetchLocalBlobs, listFiles, loadSource } from '../lib/sources.ts';
 import { LocalReview, toThreads, viewedStates } from '../lib/localstate.ts';
 import { exportMarkdown, sourceLine } from '../lib/export.ts';
+import { bump } from '../lib/reactions.ts';
 
 export type ViewMode = 'unified' | 'split';
 export type Grouping = 'tree' | 'category' | 'flat';
@@ -1289,6 +1290,53 @@ async function convWriting<T>(fn: () => Promise<T>): Promise<T> {
     }
   }
 }
+// ---------- reactions ----------
+
+function reactionsOf(s: State, id: string): { list: Reaction[]; inConv: boolean } | null {
+  if (s.conv && id === s.pr?.id) return { list: s.conv.reactions ?? [], inConv: true };
+  const c = s.conv?.comments.find(x => x.id === id) ?? s.conv?.reviews.find(x => x.id === id);
+  if (c?.reactions) return { list: c.reactions, inConv: true };
+  for (const t of s.threads) for (const x of t.comments) if (x.id === id && x.reactions) return { list: x.reactions, inConv: false };
+  return null;
+}
+
+function setReactions(id: string, fn: (list: Reaction[]) => Reaction[]) {
+  set(s => {
+    const patch = <T extends { id: string; reactions?: Reaction[] }>(x: T): T => (x.id === id && x.reactions ? { ...x, reactions: fn(x.reactions) } : x);
+    const threads = s.threads.some(t => t.comments.some(c => c.id === id))
+      ? s.threads.map(t => (t.comments.some(c => c.id === id) ? { ...t, comments: t.comments.map(patch) } : t))
+      : s.threads;
+    const conv = s.conv && {
+      ...s.conv,
+      reactions: id === s.pr?.id ? fn(s.conv.reactions ?? []) : s.conv.reactions,
+      comments: s.conv.comments.map(patch),
+      reviews: s.conv.reviews.map(patch),
+    };
+    return { threads, threadsByPath: threads === s.threads ? s.threadsByPath : byPath(threads), conv };
+  });
+}
+
+const reacting = new Set<string>();
+/** Toggles the viewer's reaction: shown at once, then settled on GitHub's counts. */
+export async function toggleReaction(subjectId: string, content: ReactionContent) {
+  const key = `${subjectId}:${content}`;
+  const found = reactionsOf(get(), subjectId);
+  if (!found || reacting.has(key)) return;
+  const on = !found.list.find(r => r.content === content)?.viewerHasReacted;
+  const pr = curKey();
+  reacting.add(key);
+  setReactions(subjectId, list => bump(list, content, on));
+  try {
+    const real = await (found.inConv ? convWriting : writing)(() => setReaction(subjectId, content, on));
+    if (onPr(pr)) setReactions(subjectId, () => real);
+  } catch (e) {
+    if (onPr(pr)) setReactions(subjectId, list => bump(list, content, !on));
+    toast(`Reaction failed: ${errText(e)}`, true);
+  } finally {
+    reacting.delete(key);
+  }
+}
+
 function setIssueComments(fn: (c: IssueComment[]) => IssueComment[]) {
   set(s => (s.conv ? { conv: { ...s.conv, comments: fn(s.conv.comments) } } : {}));
 }

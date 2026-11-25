@@ -6,6 +6,7 @@ const gh = vi.hoisted(() => ({
   fetchPatches: vi.fn(), ensurePendingReview: vi.fn(), addThread: vi.fn(), replyThread: vi.fn(),
   updateComment: vi.fn(), deleteComment: vi.fn(), resolveThread: vi.fn(), submitReview: vi.fn(), discardReview: vi.fn(),
   fetchChecks: vi.fn(), fetchConversation: vi.fn(), addIssueComment: vi.fn(), updateIssueComment: vi.fn(), deleteIssueComment: vi.fn(),
+  setReaction: vi.fn(),
 }));
 vi.mock('../lib/github.ts', () => gh);
 vi.mock('../lib/cache.ts', () => ({ getPr: async () => null, putPr: async () => {} }));
@@ -29,7 +30,7 @@ vi.mock('../lib/localstate.ts', () => ({
 }));
 
 import { listRecent } from '../lib/recent.ts';
-import { closeOpened, createThread, expand, expandedAll, load, markViewed, openComposer, openPaths, postComment, refresh, removeComment, setExpandedAll, useStore } from './store.ts';
+import { closeOpened, createThread, expand, expandedAll, load, markViewed, openComposer, openPaths, postComment, refresh, removeComment, setExpandedAll, toggleReaction, useStore } from './store.ts';
 
 const mem = new Map<string, string>();
 globalThis.localStorage = {
@@ -450,4 +451,25 @@ test('expanding all lines toggles per file', () => {
   setExpandedAll(['a'], false);
   expect(useStore.getState().expansions.a).toBeUndefined();
   expect(expandedAll(useStore.getState(), 'b')).toBe(true);
+});
+
+test('a reaction shows at once, settles on GitHub\'s counts, and reverts on failure', async () => {
+  const t = thread('T');
+  t.comments[0] = { ...t.comments[0], state: 'SUBMITTED', reactions: [{ content: 'HEART', count: 1, viewerHasReacted: false }], canReact: true };
+  await loaded(pr({ threads: [t] }));
+  const reactions = () => useStore.getState().threads[0].comments[0].reactions;
+
+  const ok = deferred<unknown>();
+  gh.setReaction.mockReturnValueOnce(ok.promise);
+  const p1 = toggleReaction('T-c', 'HEART');
+  expect(reactions()).toEqual([{ content: 'HEART', count: 2, viewerHasReacted: true }]);
+  expect(gh.setReaction).toHaveBeenCalledWith('T-c', 'HEART', true);
+  ok.resolve([{ content: 'HEART', count: 5, viewerHasReacted: true }]);
+  await p1;
+  expect(reactions()).toEqual([{ content: 'HEART', count: 5, viewerHasReacted: true }]);
+
+  gh.setReaction.mockRejectedValueOnce(new Error('nope'));
+  await toggleReaction('T-c', 'EYES');
+  expect(reactions()).toEqual([{ content: 'HEART', count: 5, viewerHasReacted: true }]);
+  expect(useStore.getState().toasts.at(-1)?.text).toContain('Reaction failed');
 });
