@@ -38,6 +38,7 @@ export function App({ reviewRef: ref }: { reviewRef: ReviewRef }) {
   const error = useStore(s => s.error);
   const tab = useStore(s => s.tab);
   const width = useStore(s => s.settings.sidebarWidth);
+  const sidebar = useStore(s => s.settings.sidebar);
   const fontSize = useStore(s => s.settings.fontSize);
 
   useEffect(() => { void load(ref); }, [refKey(ref)]);
@@ -82,7 +83,7 @@ export function App({ reviewRef: ref }: { reviewRef: ReviewRef }) {
         <TopBar />
         <Banners />
       </div>
-      <div className="body" style={{ gridTemplateColumns: `${width}px 1fr` }}>
+      <div className="body" style={{ gridTemplateColumns: sidebar ? `${width}px minmax(0, 1fr)` : 'minmax(0, 1fr)' }}>
         <Sidebar />
         <Main tab={tab} />
       </div>
@@ -193,6 +194,7 @@ function ViewControls({ conversation }: { conversation: boolean }) {
   );
   return (
     <>
+      <button className={settings.sidebar ? 'on' : ''} onClick={toggleSidebar} title="Show / hide the file list (b)">Files</button>
       <button onClick={openFinder} title="Go to any file (T)">Go to file</button>
       <span className="seg">
         {tabBtn('overview', 'Overview', 'o')}
@@ -451,6 +453,7 @@ const KEYS: Array<[string, string]> = [
   ['o / d / t', 'overview / diff / conversation'],
   ['T', 'go to any file'],
   ['h', 'syntax highlighting on / off'],
+  ['b', 'show / hide the file list'],
   ['/', 'filter files'],
   ['r', 'refresh comments + viewed state'],
   ['c', 'comment on current file'],
@@ -470,6 +473,10 @@ function Help() {
       </div>
     </div>
   );
+}
+
+function toggleSidebar() {
+  updateSettings({ sidebar: !useStore.getState().settings.sidebar });
 }
 
 const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']);
@@ -510,7 +517,12 @@ function useKeys() {
         case 'h': updateSettings({ highlight: !st.highlight }); break;
         case 'r': void refresh(true); break;
         case 'c': if (s.current && !isLocalReview(s) && !s.pr?.files.some(f => f.path === s.current)) toast("GitHub takes comments only on the PR's files."); else if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
-        case '/': e.preventDefault(); document.getElementById('file-filter')?.focus(); break;
+        case 'b': toggleSidebar(); break;
+        case '/': {
+          if (!st.sidebar) updateSettings({ sidebar: true });
+          requestAnimationFrame(() => document.getElementById('file-filter')?.focus());
+          break;
+        }
         case '?': useStore.setState({ help: !s.help }); break;
         case 'Escape': useStore.setState({ help: false }); break;
         default: return;

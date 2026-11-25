@@ -26,12 +26,13 @@ export interface Settings {
   grouping: Grouping;
   folderDepth: number;
   showHidden: boolean;
+  sidebar: boolean;
   sidebarWidth: number;
   highlight: boolean;
 }
 export const ALL = 1e9;
 const DEFAULT_SETTINGS: Settings = {
-  viewMode: 'unified', context: 10, fontSize: 12, grouping: 'tree', folderDepth: 2, showHidden: false, sidebarWidth: 300, highlight: true,
+  viewMode: 'unified', context: 10, fontSize: 12, grouping: 'tree', folderDepth: 2, showHidden: false, sidebar: true, sidebarWidth: 300, highlight: true,
 };
 
 export type ComposerTarget =

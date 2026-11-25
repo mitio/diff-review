@@ -17,6 +17,7 @@ export function Sidebar() {
   const repoRules = useStore(s => s.repoRules);
   const prRules = useStore(s => s.prRules);
   const width = useStore(s => s.settings.sidebarWidth);
+  const shown = useStore(s => s.settings.sidebar);
 
   const files = useMemo(() => {
     const rs = { repoRules, prRules };
@@ -44,7 +45,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="sidebar" style={{ width }}>
+    <aside className="sidebar" style={{ width }} hidden={!shown}>
       <div className="tools">
         <input
           id="file-filter"
