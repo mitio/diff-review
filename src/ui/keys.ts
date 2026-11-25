@@ -4,7 +4,7 @@ import {
   ALL, expandedAll, isLocalReview, isViewed, openComposer, refresh, setCollapsed, setCollapsedMany, setExpandedAll, setOutline, streamFiles, toast, updateSettings,
   useStore, type State, type Tab,
 } from './store.ts';
-import { stepFile, toggleViewedCurrent } from './nav.ts';
+import { mainEl, stepFile, toggleViewedCurrent } from './nav.ts';
 import { openFinder } from './Finder.tsx';
 
 export const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
@@ -55,6 +55,15 @@ function stepContext(s: State, dir: 1 | -1) {
   updateSettings({ context: CONTEXTS[Math.min(CONTEXTS.length - 1, Math.max(0, (i < 0 ? 3 : i) + dir))] });
 }
 
+/** Scrolls the open view (diff, or the Overview / Conversation overlay) whatever has focus. */
+function scroll(by: 'line' | 'half' | 'page' | 'end', dir: 1 | -1) {
+  const el = document.querySelector<HTMLElement>('.overlay') ?? mainEl();
+  if (!el) return;
+  if (by === 'end') return el.scrollTo({ top: dir > 0 ? el.scrollHeight : 0 });
+  const px = by === 'line' ? 60 : by === 'half' ? el.clientHeight / 2 : el.clientHeight * 0.9;
+  el.scrollBy({ top: dir * px, behavior: by === 'line' ? 'auto' : 'smooth' });
+}
+
 interface Shortcut {
   /** `e.key` values; a second key does the reverse, or the all-files version, and runs with `alt`. */
   keys: [string] | [string, string];
@@ -76,6 +85,15 @@ export const SHORTCUTS = [
           requestAnimationFrame(() => document.getElementById('file-filter')?.focus());
         },
       },
+    },
+  },
+  {
+    group: 'Scroll',
+    items: {
+      line: { keys: ['ArrowDown', 'ArrowUp'], label: 'down / up', run: (_, alt) => scroll('line', alt ? -1 : 1) },
+      page: { keys: [' ', 'Shift+ '], label: 'page down / up (also PageDown / PageUp)', run: (_, alt) => scroll('page', alt ? -1 : 1) },
+      half: { keys: ['d', 'u'], label: 'half a page down / up', run: (_, alt) => scroll('half', alt ? -1 : 1) },
+      ends: { keys: ['g', 'G'], label: 'top / bottom (also Home / End)', run: (_, alt) => scroll('end', alt ? 1 : -1) },
     },
   },
   {
@@ -121,8 +139,10 @@ export type ShortcutId = IdsOf<(typeof SHORTCUTS)[number]>;
 const ITEMS: Record<string, Shortcut> = Object.fromEntries(SHORTCUTS.flatMap(g => Object.entries(g.items)));
 
 /** How help and tooltips write a shortcut, e.g. `x / X`. */
+const SHOWN: Record<string, string> = { Escape: 'Esc', ArrowDown: '↓', ArrowUp: '↑', ' ': 'Space', 'Shift+ ': '⇧Space' };
+
 export function kbd(id: ShortcutId): string {
-  return ITEMS[id].keys.map(k => (k === 'Escape' ? 'Esc' : k)).join(' / ');
+  return ITEMS[id].keys.map(k => SHOWN[k] ?? k).join(' / ');
 }
 
 const BY_KEY = new Map<string, (s: State) => void>();
@@ -130,7 +150,11 @@ for (const sc of Object.values(ITEMS)) {
   const run = sc.run;
   if (run) sc.keys.forEach((k, n) => BY_KEY.set(k, s => run(s, n > 0)));
 }
-BY_KEY.set('+', BY_KEY.get('=')!);
+for (const [alias, key] of Object.entries({ '+': '=', PageDown: ' ', PageUp: 'Shift+ ', Home: 'g', End: 'G' })) BY_KEY.set(alias, BY_KEY.get(key)!);
+
+/** Where a scroll key belongs to the focused control or popup instead of the view. */
+const OWNS: Record<string, string> = { ' ': 'input, button, select, a, summary, .popover, .help' };
+for (const k of ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End']) OWNS[k] = 'input[type=radio], select, .popover, .help';
 
 const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']);
 function typesText(t: HTMLElement) {
@@ -141,8 +165,10 @@ function typesText(t: HTMLElement) {
 export function useKeys() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (typesText(e.target as HTMLElement) || e.metaKey || e.ctrlKey || e.altKey) return;
-      const run = BY_KEY.get(e.key);
+      const t = e.target as HTMLElement;
+      if (typesText(t) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (OWNS[e.key] && (t.closest?.(OWNS[e.key]) || useStore.getState().help)) return;
+      const run = BY_KEY.get(e.key === ' ' && e.shiftKey ? 'Shift+ ' : e.key);
       if (!run) return;
       e.preventDefault();
       run(useStore.getState());

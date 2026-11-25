@@ -52,7 +52,8 @@ The CLI starts the server if it isn't running (log: `~/.local/state/diff-review/
 - **Syntax highlighting** (`h` toggles) runs in a web worker and never blocks scrolling.
 - **The URL holds the view** (tab, focused group, filter, current file), so back/forward and links work.
   Unified/split, context and font size are preferences and stay as you set them.
-- **Keys** (Shift applies a file key to all files): `j/k` files, `t` go to any file, `/` filter, `m/M` views, `v` viewed +
+- **Keys** (Shift applies a file key to all files): `↓ ↑`, `Space`/`⇧Space`, `d/u` half page and `g/G` scroll the view
+  wherever focus is; `j/k` files, `t` go to any file, `/` filter, `m/M` views, `v` viewed +
   next, `x` collapse, `e` expand all lines, `z` outline, `c` file comment, `f` finish review, `s` split/unified,
   `[ ]` context, `- =` font, `h` highlighting, `b` file list, `r` refresh, `?` help.
 - **Comments** render GitHub's Markdown with syntax-highlighted code blocks, and `:` autocompletes emoji.
