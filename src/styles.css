@@ -168,6 +168,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .sidebar .tools { display: flex; gap: 4px; padding: 6px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; align-items: center; }
 .sidebar .tools input[type=text] { flex: 1; min-width: 80px; }
 .sidebar .list { overflow: auto; flex: 1; padding: 2px 0 40px; }
+.sidebar .frow { scroll-margin-block: 26px; }
 .resizer { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 5; }
 .mainwrap { position: relative; min-width: 0; min-height: 0; }
 .main { overflow: auto; position: absolute; inset: 0; }

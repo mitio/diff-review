@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { PrFile, TreeNode } from '../types.ts';
 import { buildTree, categorize, CATEGORIES, CATEGORY_LABELS } from '../lib/categorize.ts';
 import {
@@ -96,12 +96,23 @@ function OpenedList() {
   );
 }
 
+/** Keeps the current file's row in view as j / k or scrolling the diff move it. */
+function useRevealWhenCurrent(current: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const shown = useStore(s => s.settings.sidebar);
+  useEffect(() => {
+    if (current && shown) ref.current?.scrollIntoView({ block: 'nearest' });
+  }, [current, shown]);
+  return ref;
+}
+
 function OpenedRow({ f }: { f: PrFile }) {
   const current = useStore(s => s.current === f.path);
   const nThreads = useStore(s => s.threadsByPath[f.path]?.length ?? 0);
   const nPending = useStore(s => pendingIn(s.threadsByPath[f.path]));
+  const ref = useRevealWhenCurrent(current);
   return (
-    <div className={`frow${current ? ' current' : ''}`} style={{ paddingLeft: 18 }} onClick={() => goToFile(f.path)} title={f.path}>
+    <div ref={ref} className={`frow${current ? ' current' : ''}`} style={{ paddingLeft: 18 }} onClick={() => goToFile(f.path)} title={f.path}>
       <StatusLetter status={f.status} />
       <span className="fname">{f.path}</span>
       {nPending > 0 && <PendingCount n={nPending} />}
@@ -189,8 +200,10 @@ const FileRow = memo(function FileRow({ f, max, depth, label }: { f: PrFile; max
   const hidden = useStore(s => fileHidden(s, f));
   const nThreads = useStore(s => (s.threadsByPath[f.path]?.length ?? 0) + (f.previousPath ? s.threadsByPath[f.previousPath]?.length ?? 0 : 0));
   const nPending = useStore(s => pendingIn(s.threadsByPath[f.path]) + (f.previousPath ? pendingIn(s.threadsByPath[f.previousPath]) : 0));
+  const ref = useRevealWhenCurrent(current);
   return (
     <div
+      ref={ref}
       className={`frow${current ? ' current' : ''}${hidden ? ' hidden-file' : ''}${isViewed(v) ? ' viewed' : ''}`}
       style={{ paddingLeft: 18 + depth * 12 }}
       onClick={() => goToFile(f.path)}
