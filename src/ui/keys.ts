@@ -92,7 +92,7 @@ export const SHORTCUTS = [
     items: {
       line: { keys: ['ArrowDown', 'ArrowUp'], label: 'down / up', run: (_, alt) => scroll('line', alt ? -1 : 1) },
       page: { keys: [' ', 'Shift+ '], label: 'page down / up (also PageDown / PageUp)', run: (_, alt) => scroll('page', alt ? -1 : 1) },
-      half: { keys: ['d', 'u'], label: 'half a page down / up', run: (_, alt) => scroll('half', alt ? -1 : 1) },
+      half: { keys: ['J', 'K'], label: 'half a page down / up', run: (_, alt) => scroll('half', alt ? -1 : 1) },
       ends: { keys: ['g', 'G'], label: 'top / bottom (also Home / End)', run: (_, alt) => scroll('end', alt ? 1 : -1) },
     },
   },

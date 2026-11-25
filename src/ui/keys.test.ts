@@ -16,7 +16,7 @@ describe('shortcuts', () => {
     expect(new Set(keys).size).toBe(keys.length);
     for (const g of SHORTCUTS) for (const s of Object.values(g.items)) {
       const [a, b] = s.keys as readonly string[];
-      if (b && /^[A-Z]$/.test(b)) expect(b).toBe(a.toUpperCase());
+      if (b && /^[a-z]$/.test(a) && /^[A-Z]$/.test(b)) expect(b).toBe(a.toUpperCase());
     }
   });
 
