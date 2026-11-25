@@ -4,6 +4,7 @@ import type { Comment, NewThread, Thread } from '../types.ts';
 import { createThread, draftKey, editComment, isLocalReview, pendingIn, removeComment, reply, setResolved, useStore } from './store.ts';
 import { UserLink, relTime } from './bits.tsx';
 import { plainBodyHtml } from '../lib/mdcode.ts';
+import { EmojiTextarea } from './EmojiTextarea.tsx';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
   if (node.tagName === 'A') {
@@ -57,7 +58,7 @@ export function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, o
   };
   return (
     <div className="composer" onClick={e => e.stopPropagation()}>
-      <textarea
+      <EmojiTextarea
         ref={ref}
         value={text}
         placeholder={placeholder ?? 'Leave a comment (Markdown). ⌘↵ to add, Esc to cancel'}

@@ -18,6 +18,7 @@ import { UserLink, relTime } from './bits.tsx';
 import { setScrollRoot } from './Lazy.tsx';
 import { onMainScroll, openFile, scrollToFile, stepFile, toggleViewedCurrent } from './nav.ts';
 import { Finder, openFinder } from './Finder.tsx';
+import { EmojiTextarea } from './EmojiTextarea.tsx';
 
 const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
 
@@ -378,7 +379,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
       <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
         {pending ? `${pending} pending comment${pending === 1 ? '' : 's'}` : 'No pending comments'}{hasDraft ? ' in your draft review' : ''}.{pending ? ' Only you can see them until you submit.' : ''}
       </div>
-      <textarea
+      <EmojiTextarea
         autoFocus
         rows={5}
         placeholder="Leave a comment (optional)"
