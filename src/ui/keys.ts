@@ -109,7 +109,8 @@ export const SHORTCUTS = [
     group: 'Other',
     items: {
       refresh: { keys: ['r'], label: 'refresh comments and viewed state', run: () => void refresh(true) },
-      submit: { keys: ['⌘↵'], label: 'send the comment being written' },
+      submit: { keys: ['f'], label: 'finish the review (local: export the comments)', run: s => useStore.setState({ submitOpen: !s.submitOpen }) },
+      send: { keys: ['⌘↵'], label: 'send the comment or review being written' },
       help: { keys: ['?'], label: 'this help', run: s => useStore.setState({ help: !s.help }) },
     },
   },

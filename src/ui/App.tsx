@@ -222,7 +222,8 @@ function LocalTopBar() {
   const busy = useStore(s => s.busy);
   const revalidating = useStore(s => s.revalidating);
   const open = useStore(s => openCount(s));
-  const [exportOpen, setExportOpen] = useState(false);
+  const exportOpen = useStore(s => s.submitOpen);
+  const setExportOpen = (submitOpen: boolean) => useStore.setState({ submitOpen });
   const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
   const gh = githubUrl(pr.ref);
   const r = pr.ref;
@@ -245,7 +246,7 @@ function LocalTopBar() {
       {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
       <ViewControls conversation={false} />
       <span style={{ position: 'relative' }}>
-        <button className={open ? 'primary' : ''} onClick={() => setExportOpen(!exportOpen)} title="Copy or download the comments as Markdown">
+        <button className={open ? 'primary' : ''} onClick={() => setExportOpen(!exportOpen)} title={`Copy or download the comments as Markdown (${kbd('submit')})`}>
           Comments{open ? ` · ${open}` : ''}
         </button>
         {exportOpen && <ExportPanel onClose={() => setExportOpen(false)} />}
@@ -315,7 +316,8 @@ function PrTopBar() {
   const hasDraft = useStore(s => !!s.pendingReviewId);
   const busy = useStore(s => s.busy);
   const revalidating = useStore(s => s.revalidating);
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const reviewOpen = useStore(s => s.submitOpen);
+  const setReviewOpen = (submitOpen: boolean) => useStore.setState({ submitOpen });
   const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
   return (
     <div className="topbar">
@@ -337,7 +339,7 @@ function PrTopBar() {
         <button
           className={hasDraft || pending ? 'pending-review' : ''}
           onClick={() => setReviewOpen(!reviewOpen)}
-          title={hasDraft || pending ? 'Your review is not submitted: only you can see its comments' : 'Submit a review'}
+          title={`${hasDraft || pending ? 'Your review is not submitted: only you can see its comments' : 'Submit a review'} (${kbd('submit')})`}
         >
           {hasDraft || pending ? `Finish review · ${pending} pending` : 'Review'}
         </button>

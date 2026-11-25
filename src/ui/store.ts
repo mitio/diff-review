@@ -106,6 +106,8 @@ export interface State {
   revalidating: boolean;
   busy: number;
   help: boolean;
+  /** The Finish review panel (PRs) or the comments export panel (local reviews). */
+  submitOpen: boolean;
   settings: Settings;
 }
 
@@ -160,7 +162,7 @@ export const useStore = create<State>(() => ({
   ref: null, pr: null, loading: false, error: null, viewed: dict(), threads: [], threadsByPath: dict(),
   pendingReviewId: null, blobs: dict(), bigDiffs: dict(), repoRules: [], prRules: [], collapsed: dict(),
   expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), folds: dict(), tab: 'diff', current: null, pendingFile: null, reveal: null, opened: [], tree: null, finder: false, checks: null, conv: null, filter: '', focus: null,
-  toasts: [], stale: false, revalidating: false, busy: 0, help: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
+  toasts: [], stale: false, revalidating: false, busy: 0, help: false, submitOpen: false, settings: read('ghr:settings', DEFAULT_SETTINGS),
 }));
 
 const set = useStore.setState;
@@ -359,7 +361,7 @@ export async function load(ref: ReviewRef) {
   for (const [p, v] of book.local) seeded[p] = v;
   set(s => ({
     ref, loading: true, error: null, pr: null, viewed: samePr ? s.viewed : seeded, threads: [], threadsByPath: dict(),
-    pendingReviewId: null, checks: null, tree: null, finder: false, ...(samePr ? {} : { conv: null, current: null, reveal: null, opened: [] }),
+    pendingReviewId: null, checks: null, tree: null, finder: false, submitOpen: false, ...(samePr ? {} : { conv: null, current: null, reveal: null, opened: [] }),
     blobs: dict(), bigDiffs: dict(), collapsed: dict(), expansions: dict(), composers: dict(), selAnchor: null, dragSel: null, outline: dict(), folds: dict(),
     stale: false, revalidating: false, repoRules: readArr<HideRule>(repoKey(ref)), prRules: readArr<HideRule>(prKey(ref)),
   }));
