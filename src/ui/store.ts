@@ -994,6 +994,21 @@ export function expand(path: string, from: number, to: number) {
   set(s => ({ expansions: put(s.expansions, path, [...(s.expansions[path] ?? []), [from, to] as [number, number]]) }));
 }
 
+const WHOLE: [number, number] = [0, Number.MAX_SAFE_INTEGER];
+export const expandedAll = (s: Pick<State, 'expansions'>, path: string) => !!s.expansions[path]?.includes(WHOLE);
+
+/** Shows every line of the files, or drops all their expansions (GitHub's "Collapse expanded lines"). */
+export function setExpandedAll(paths: string[], on: boolean) {
+  set(s => {
+    const expansions = dict(s.expansions);
+    for (const p of paths) {
+      if (on) expansions[p] = [WHOLE];
+      else delete expansions[p];
+    }
+    return { expansions };
+  });
+}
+
 export function openComposer(path: string, t: ComposerTarget) {
   set(s => ({ composers: put(s.composers, path, t) }));
 }

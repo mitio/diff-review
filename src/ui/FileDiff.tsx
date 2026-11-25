@@ -5,7 +5,7 @@ import { anchorStatus, locateThread, quoteRows } from '../lib/anchor.ts';
 import { ghRepo } from '../lib/refs.ts';
 import {
   ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, pendingIn, resetFolds,
-  setCollapsed, setFolds, setLocalOutdated, toast, toggleFileHidden, toggleOutline, useStore, type ComposerTarget,
+  setCollapsed, setExpandedAll, setFolds, setLocalOutdated, toast, toggleFileHidden, toggleOutline, useStore, type ComposerTarget,
 } from './store.ts';
 import { kbd } from './keys.ts';
 import { Lazy } from './Lazy.tsx';
@@ -55,6 +55,8 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
   const ghUrl = githubBlobUrl(pr, path);
 
   const collapsed = collapsedOverride ?? isViewed(viewed);
+  const stored = useStore(s => s.expansions[path]);
+  const context = useStore(s => s.settings.context);
 
   const model: FileModel | null = useMemo(() => {
     if (bigDiff && typeof bigDiff === 'object' && 'rows' in bigDiff) return { rows: bigDiff.rows, complete: true };
@@ -67,6 +69,12 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
 
   const changed = file.additions + file.deletions;
   const unchanged = isUnchanged(file);
+  /** 'expand' while lines can be shown, 'collapse' once expansions show them all; like GitHub's ↕ button */
+  const expandBtn = useMemo(() => {
+    if (!model?.complete || unchanged || outlined || context >= ALL) return null;
+    if (view(model, context, stored ?? []).some(it => it.kind === 'gap')) return 'expand';
+    return stored?.length ? 'collapse' : null;
+  }, [model, unchanged, outlined, context, stored]);
   /** per thread: itself if it goes under the header (file-level, outdated, or not placeable yet), else null */
   const { located, flags } = useMemo(() => {
     const flags: Record<string, boolean> = {};
@@ -143,6 +151,15 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
         {pendingIn(threads) > 0 && <span className="chip pending" title="Pending comments: only you can see them until you finish your review">{pendingIn(threads)} pending</span>}
         {blob === 'loading' && !collapsed && <span className="faint" title="loading full file for context">…</span>}
+        {expandBtn && !collapsed && (
+          <button
+            className="small"
+            title={`${expandBtn === 'expand' ? 'Show every line of the file' : 'Hide the unchanged lines again'} (${kbd('expand')})`}
+            onClick={() => setExpandedAll([path], expandBtn === 'expand')}
+          >
+            {expandBtn === 'expand' ? '↕ Expand all' : '↕ Collapse expanded'}
+          </button>
+        )}
         <button className={`small${outlined ? ' on' : ''}`} title={`Whole file with its blocks folded (${kbd('outline')})`} onClick={() => toggleOutline(path)}>
           Outline
         </button>

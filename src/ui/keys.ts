@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { isPr } from '../lib/refs.ts';
 import {
-  ALL, isLocalReview, isViewed, openComposer, refresh, setCollapsed, setCollapsedMany, setOutline, streamFiles, toast, updateSettings,
+  ALL, expandedAll, isLocalReview, isViewed, openComposer, refresh, setCollapsed, setCollapsedMany, setExpandedAll, setOutline, streamFiles, toast, updateSettings,
   useStore, type State, type Tab,
 } from './store.ts';
 import { stepFile, toggleViewedCurrent } from './nav.ts';
@@ -30,6 +30,11 @@ function collapse(s: State, all: boolean) {
   const paths = scope(s, all);
   const collapsed = (p: string) => s.collapsed[p] ?? isViewed(s.viewed[p]);
   setCollapsedMany(paths, !paths.every(collapsed));
+}
+
+function expandLines(s: State, all: boolean) {
+  const paths = scope(s, all);
+  setExpandedAll(paths, !paths.every(p => expandedAll(s, p)));
 }
 
 function outline(s: State, all: boolean) {
@@ -85,6 +90,7 @@ export const SHORTCUTS = [
     items: {
       viewed: { keys: ['v'], label: 'viewed on / off, then jump to the next unviewed', run: () => toggleViewedCurrent() },
       collapse: { keys: ['x', 'X'], label: 'collapse / expand', run: collapse },
+      expand: { keys: ['e', 'E'], label: 'expand all lines / collapse them again', run: expandLines },
       outline: { keys: ['z', 'Z'], label: 'outline: fold to the file’s blocks', run: outline },
       comment: { keys: ['c'], label: 'comment on the file', run: commentOnFile },
     },

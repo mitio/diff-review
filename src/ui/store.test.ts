@@ -29,7 +29,7 @@ vi.mock('../lib/localstate.ts', () => ({
 }));
 
 import { listRecent } from '../lib/recent.ts';
-import { closeOpened, createThread, load, markViewed, openComposer, openPaths, postComment, refresh, removeComment, useStore } from './store.ts';
+import { closeOpened, createThread, expand, expandedAll, load, markViewed, openComposer, openPaths, postComment, refresh, removeComment, setExpandedAll, useStore } from './store.ts';
 
 const mem = new Map<string, string>();
 globalThis.localStorage = {
@@ -441,4 +441,13 @@ test("a file fetch from a review left behind cannot overwrite the next review's 
   old.reject(new Error('gone'));
   await flush();
   expect(useStore.getState().blobs['x.ts']).toEqual(blobOf('new'));
+});
+
+test('expanding all lines toggles per file', () => {
+  expand('a', 3, 5);
+  setExpandedAll(['a', 'b'], true);
+  expect(expandedAll(useStore.getState(), 'a') && expandedAll(useStore.getState(), 'b')).toBe(true);
+  setExpandedAll(['a'], false);
+  expect(useStore.getState().expansions.a).toBeUndefined();
+  expect(expandedAll(useStore.getState(), 'b')).toBe(true);
 });
