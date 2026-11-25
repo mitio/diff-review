@@ -9,7 +9,7 @@ import type { Row } from '../types.ts';
 export { languageOf } from './languages.ts';
 
 export type { Tok } from './languages.ts';
-import type { Tok } from './languages.ts';
+import { languageOf, type Tok } from './languages.ts';
 
 let lowlight: ReturnType<typeof createLowlight> | null = null;
 function ll() {
@@ -84,4 +84,36 @@ export function highlightRows(rows: Pick<Row, 'kind' | 'text'>[], lang: string):
     oldIdx.forEach((i, j) => { a[i] = oldLines[j] ?? null; });
   }
   return { a, b };
+}
+
+const MAX_BLOCK_CHARS = 20_000;
+
+/**
+ * A fence's language: the one its info string names (null if unknown), else the commented
+ * file's, else 'auto' (guess). `suggestion` is the file's.
+ */
+export function resolveLang(info: string | null | undefined, path?: string): string | null {
+  const name = info?.trim().split(/[\s{,]/)[0].toLowerCase();
+  if (name && name !== 'suggestion') return ll().registered(name) ? name : languageOf(`x.${name}`);
+  return (path && languageOf(path)) || 'auto';
+}
+
+/** Highlighted HTML (highlight.js classes) for a code block in `lang` from resolveLang(). */
+export function highlightHtml(code: string, lang: string | null): string | null {
+  if (!lang || !code.trim() || code.length > MAX_BLOCK_CHARS) return null;
+  let tree: HNode & { data?: { relevance?: number } };
+  try {
+    tree = (lang === 'auto' ? ll().highlightAuto(code) : ll().highlight(lang, code)) as unknown as typeof tree;
+  } catch {
+    return null;
+  }
+  if (lang === 'auto' && (tree.data?.relevance ?? 0) < 5) return null;
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const html = (n: HNode): string => {
+    if (n.type === 'text') return esc(n.value ?? '');
+    const inner = (n.children ?? []).map(html).join('');
+    const cls = n.properties?.className?.join(' ');
+    return n.type === 'element' && cls ? `<span class="${esc(cls)}">${inner}</span>` : inner;
+  };
+  return html(tree);
 }

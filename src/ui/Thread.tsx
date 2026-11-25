@@ -1,8 +1,9 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import type { Comment, NewThread, Thread } from '../types.ts';
 import { createThread, draftKey, editComment, isLocalReview, pendingIn, removeComment, reply, setResolved, useStore } from './store.ts';
 import { UserLink, relTime } from './bits.tsx';
+import { plainBodyHtml } from '../lib/mdcode.ts';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
   if (node.tagName === 'A') {
@@ -117,12 +118,29 @@ export function NewComment({ path, label, initial, target, onDone }: {
   );
 }
 
-export const Body = memo(function Body({ c }: { c: Pick<Comment, 'body' | 'bodyHTML'> }) {
-  if (!c.bodyHTML) return <div className="md" style={{ whiteSpace: 'pre-wrap' }}>{c.body}</div>;
-  return <div className="md" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(c.bodyHTML) }} />;
+/** `path` is the commented file: its language highlights code blocks that name none. */
+export const Body = memo(function Body({ c, path }: { c: Pick<Comment, 'body' | 'bodyHTML'>; path?: string }) {
+  const hl = useStore(s => s.settings.highlight);
+  const ref = useRef<HTMLDivElement>(null);
+  const html = useMemo(() => (c.bodyHTML ? DOMPurify.sanitize(c.bodyHTML) : plainBodyHtml(c.body)), [c.bodyHTML, c.body]);
+  useEffect(() => { if (hl && ref.current) void highlightBlocks(ref.current, path); }, [html, path, hl]);
+  // remounting on `hl` drops highlighting done in place
+  return <div key={String(hl)} ref={ref} className={`md${c.bodyHTML ? '' : ' plain'}${hl ? '' : ' nohl'}`} dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
-function CommentView({ c }: { c: Comment }) {
+/** Highlights the code blocks GitHub left plain: no language, one it doesn't know, or a body it didn't render. */
+async function highlightBlocks(root: HTMLElement, path: string | undefined) {
+  const pres = [...root.querySelectorAll('pre')].filter(p => !p.querySelector('[class*="pl-"], [class*="hljs-"]'));
+  if (!pres.length) return;
+  const { highlightHtml, resolveLang } = await import('../lib/highlight.ts');
+  for (const pre of pres) {
+    const code = pre.querySelector('code') ?? pre;
+    const out = highlightHtml(code.textContent ?? '', resolveLang(pre.getAttribute('lang'), path));
+    if (out != null && pre.isConnected) code.innerHTML = out;
+  }
+}
+
+function CommentView({ c, path }: { c: Comment; path: string }) {
   const [editing, setEditing] = useState(false);
   const tmp = c.id.startsWith('tmp-');
   return (
@@ -156,7 +174,7 @@ function CommentView({ c }: { c: Comment }) {
           onCancel={() => setEditing(false)}
         />
       ) : (
-        <Body c={c} />
+        <Body c={c} path={path} />
       )}
     </div>
   );
@@ -197,7 +215,7 @@ export const ThreadView = memo(function ThreadView({ thread, showLocation }: { t
           <button className="small" onClick={() => { setOpen(true); void setResolved(thread.id, false); }}>Unresolve</button>
         )}
       </div>
-      {open && thread.comments.map(c => <CommentView key={c.id} c={c} />)}
+      {open && thread.comments.map(c => <CommentView key={c.id} c={c} path={thread.path} />)}
       {open && !tmp && (thread.viewerCanReply || pendingReview) && (
         replying ? (
           <Editor

@@ -356,6 +356,22 @@ button.pending-review { background: var(--warn-bg); border-color: var(--pending)
 .hljs-section, .hljs-strong { font-weight: 600; }
 .hljs-emphasis { font-style: italic; }
 
+/* GitHub-rendered code in comments (Primer "prettylights" classes) */
+.md:not(.nohl) :is(.pl-c) { color: var(--hl-comment); font-style: italic; }
+.md:not(.nohl) :is(.pl-k) { color: var(--hl-keyword); }
+.md:not(.nohl) :is(.pl-s, .pl-pds, .pl-sr, .pl-s .pl-pse .pl-s1) { color: var(--hl-string); }
+.md:not(.nohl) :is(.pl-c1, .pl-s .pl-v, .pl-mdr) { color: var(--hl-number); }
+.md:not(.nohl) :is(.pl-e, .pl-en) { color: var(--hl-title); }
+.md:not(.nohl) :is(.pl-ent) { color: var(--hl-tag); }
+.md:not(.nohl) :is(.pl-v, .pl-smw) { color: var(--hl-type); }
+.md:not(.nohl) :is(.pl-mh, .pl-mb) { font-weight: 600; }
+.md:not(.nohl) .pl-mi { font-style: italic; }
+.md:not(.nohl) .pl-md { color: var(--del-fg); }
+.md:not(.nohl) .pl-mi1 { color: var(--add-fg); }
+.md.nohl [class*="pl-"] { color: inherit; font-style: inherit; font-weight: inherit; }
+.md.plain { white-space: pre-wrap; }
+.md.plain pre { white-space: pre; margin: 4px 0; }
+
 /* CI */
 .chip.ci-ok, td.ci-ok { color: var(--ci-ok); }
 .chip.ci-fail, td.ci-fail { color: var(--ci-fail); }
