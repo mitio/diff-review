@@ -5,8 +5,8 @@ import { listRecent, recentId, removeRecent, type RecentPr } from '../lib/recent
 import { appPath, githubUrl, isPr, parseReviewInput, prRef, refKey } from '../lib/refs.ts';
 import { contentOid, createPaste } from '../lib/sources.ts';
 import {
-  ALL, composing, setOutline, discard, dismissToast, exportLocal, flushRecent, toast, toggleOutline, draftKey, headChecks, isLocalReview, loadChecks, openComposer,
-  openCount, setCollapsed, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
+  ALL, composing, discard, dismissToast, exportLocal, flushRecent, toast, draftKey, headChecks, isLocalReview, loadChecks,
+  openCount, fileHidden, isViewed, load, pendingCount, refresh, streamFiles, submit, updateSettings, useStore, type Tab,
 } from './store.ts';
 import { Conversation } from './Conversation.tsx';
 import { navigate, onLinkClick, sameRef, useRoute } from './router.ts';
@@ -16,11 +16,10 @@ import { FileBlock } from './FileDiff.tsx';
 import { ThreadView } from './Thread.tsx';
 import { UserLink, relTime } from './bits.tsx';
 import { setScrollRoot } from './Lazy.tsx';
-import { onMainScroll, openFile, scrollToFile, stepFile, toggleViewedCurrent } from './nav.ts';
+import { onMainScroll, openFile, scrollToFile } from './nav.ts';
 import { Finder, openFinder } from './Finder.tsx';
 import { EmojiTextarea } from './EmojiTextarea.tsx';
-
-const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
+import { CONTEXTS, SHORTCUTS, kbd, toggleSidebar, useKeys, type ShortcutId } from './keys.ts';
 
 /** Short name of what is being reviewed. */
 export function refLabel(r: ReviewRef): string {
@@ -190,26 +189,26 @@ function ViewControls({ conversation }: { conversation: boolean }) {
   const settings = useStore(s => s.settings);
   const conv = useStore(s => s.conv);
   const nConv = conv ? conv.comments.length + conv.reviews.filter(r => r.body.trim()).length : null;
-  const tabBtn = (t: Tab, label: string, key: string) => (
-    <button className={tab === t ? 'on' : ''} onClick={() => useStore.setState({ tab: t })} title={`${label} (${key})`}>{label}</button>
+  const tabBtn = (t: Tab, label: string) => (
+    <button className={tab === t ? 'on' : ''} onClick={() => useStore.setState({ tab: t })} title={`Switch views with ${kbd('view')}`}>{label}</button>
   );
   return (
     <>
-      <button className={settings.sidebar ? 'on' : ''} onClick={toggleSidebar} title="Show / hide the file list (b)">Files</button>
-      <button onClick={openFinder} title="Go to any file (T)">Go to file</button>
+      <button className={settings.sidebar ? 'on' : ''} onClick={toggleSidebar} title={`File list on / off (${kbd('sidebar')})`}>Files</button>
+      <button onClick={openFinder} title={`Go to any file (${kbd('finder')})`}>Go to file</button>
       <span className="seg">
-        {tabBtn('overview', 'Overview', 'o')}
-        {tabBtn('diff', 'Diff', 'd')}
-        {conversation && tabBtn('conversation', nConv ? `Conversation · ${nConv}` : 'Conversation', 't')}
+        {tabBtn('diff', 'Diff')}
+        {tabBtn('overview', 'Overview')}
+        {conversation && tabBtn('conversation', nConv ? `Conversation · ${nConv}` : 'Conversation')}
       </span>
-      <span className="seg" title="Toggle with s">
+      <span className="seg" title={`Unified / split (${kbd('split')})`}>
         <button className={settings.viewMode === 'unified' ? 'on' : ''} onClick={() => updateSettings({ viewMode: 'unified' })}>Unified</button>
         <button className={settings.viewMode === 'split' ? 'on' : ''} onClick={() => updateSettings({ viewMode: 'split' })}>Split</button>
       </span>
-      <select value={settings.context} onChange={e => updateSettings({ context: Number(e.target.value) })} title="Context lines ([ / ])">
+      <select value={settings.context} onChange={e => updateSettings({ context: Number(e.target.value) })} title={`Context lines (${kbd('context')})`}>
         {CONTEXTS.map(c => <option key={c} value={c}>{c >= ALL ? 'all lines' : `${c} lines`}</option>)}
       </select>
-      <span className="seg" title="Font size (- / =)">
+      <span className="seg" title={`Font size (${kbd('font')})`}>
         <button className="icon" onClick={() => updateSettings({ fontSize: Math.max(9, settings.fontSize - 1) })}>A−</button>
         <button className="icon" onClick={() => updateSettings({ fontSize: Math.min(18, settings.fontSize + 1) })}>A+</button>
       </span>
@@ -251,7 +250,7 @@ function LocalTopBar() {
         </button>
         {exportOpen && <ExportPanel onClose={() => setExportOpen(false)} />}
       </span>
-      <button className="icon" title="Keyboard shortcuts (?)" onClick={() => useStore.setState({ help: true })}>?</button>
+      <button className="icon" title={`Keyboard shortcuts (${kbd('help')})`} onClick={() => useStore.setState({ help: true })}>?</button>
     </div>
   );
 }
@@ -344,7 +343,7 @@ function PrTopBar() {
         </button>
         {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       </span>
-      <button className="icon" title="Keyboard shortcuts (?)" onClick={() => useStore.setState({ help: true })}>?</button>
+      <button className="icon" title={`Keyboard shortcuts (${kbd('help')})`} onClick={() => useStore.setState({ help: true })}>?</button>
     </div>
   );
 }
@@ -447,24 +446,6 @@ function Toasts() {
   );
 }
 
-const KEYS: Array<[string, string]> = [
-  ['j / k', 'next / previous file'],
-  ['v', 'toggle viewed, jump to next unviewed'],
-  ['x', 'collapse / expand current file'],
-  ['z / Z', 'outline on / off: current file / all files'],
-  ['s', 'toggle unified / split'],
-  ['[ / ]', 'less / more context'],
-  ['- / =', 'smaller / larger font'],
-  ['o / d / t', 'overview / diff / conversation'],
-  ['T', 'go to any file'],
-  ['h', 'syntax highlighting on / off'],
-  ['b', 'show / hide the file list'],
-  ['/', 'filter files'],
-  ['r', 'refresh comments + viewed state'],
-  ['c', 'comment on current file'],
-  ['⌘↵', 'add comment'],
-  ['?', 'this help'],
-];
 
 function Help() {
   const open = useStore(s => s.help);
@@ -474,69 +455,17 @@ function Help() {
     <div className="help" onClick={close}>
       <div className="card" onClick={e => e.stopPropagation()}>
         <h3 style={{ marginTop: 0 }}>Keyboard</h3>
-        <table><tbody>{KEYS.map(([k, d]) => <tr key={k}><td>{k}</td><td>{d}</td></tr>)}</tbody></table>
+        <table>
+          {SHORTCUTS.map(g => (
+            <tbody key={g.group}>
+              <tr><th colSpan={2}>{g.group}</th></tr>
+              {Object.entries(g.items).map(([id, sc]) => <tr key={id}><td>{kbd(id as ShortcutId)}</td><td>{sc.label}</td></tr>)}
+            </tbody>
+          ))}
+        </table>
       </div>
     </div>
   );
-}
-
-function toggleSidebar() {
-  updateSettings({ sidebar: !useStore.getState().settings.sidebar });
-}
-
-const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image']);
-function typesText(t: HTMLElement) {
-  if (t instanceof HTMLInputElement) return !NON_TEXT_INPUTS.has(t.type);
-  return !!t.closest('textarea, select, [contenteditable]');
-}
-
-function useKeys() {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement;
-      if (typesText(t) || e.metaKey || e.ctrlKey || e.altKey) return;
-      const s = useStore.getState();
-      const st = s.settings;
-      const i = CONTEXTS.indexOf(st.context);
-      switch (e.key) {
-        case 'j': stepFile(1); break;
-        case 'k': stepFile(-1); break;
-        case 'v': toggleViewedCurrent(); break;
-        case 'z': if (s.current) { useStore.setState({ tab: 'diff' }); toggleOutline(s.current); } break;
-        case 'Z': {
-          const paths = streamFiles(s).map(f => f.path);
-          useStore.setState({ tab: 'diff' });
-          setOutline(paths, !paths.every(p => s.outline[p]));
-          break;
-        }
-        case 'x': if (s.current) setCollapsed(s.current, !(s.collapsed[s.current] ?? isViewed(s.viewed[s.current]))); break;
-        case 's': updateSettings({ viewMode: st.viewMode === 'split' ? 'unified' : 'split' }); break;
-        case '[': updateSettings({ context: CONTEXTS[Math.max(0, (i < 0 ? 3 : i) - 1)] }); break;
-        case ']': updateSettings({ context: CONTEXTS[Math.min(CONTEXTS.length - 1, (i < 0 ? 3 : i) + 1)] }); break;
-        case '-': updateSettings({ fontSize: Math.max(9, st.fontSize - 1) }); break;
-        case '=': case '+': updateSettings({ fontSize: Math.min(18, st.fontSize + 1) }); break;
-        case 'o': useStore.setState({ tab: 'overview' }); break;
-        case 'd': useStore.setState({ tab: 'diff' }); break;
-        case 't': if (isPr(s.ref)) useStore.setState({ tab: 'conversation' }); break;
-        case 'T': openFinder(); break;
-        case 'h': updateSettings({ highlight: !st.highlight }); break;
-        case 'r': void refresh(true); break;
-        case 'c': if (s.current && !isLocalReview(s) && !s.pr?.files.some(f => f.path === s.current)) toast("GitHub takes comments only on the PR's files."); else if (s.current) { useStore.setState({ tab: 'diff' }); setCollapsed(s.current, false); openComposer(s.current, { kind: 'file' }); } break;
-        case 'b': toggleSidebar(); break;
-        case '/': {
-          if (!st.sidebar) updateSettings({ sidebar: true });
-          requestAnimationFrame(() => document.getElementById('file-filter')?.focus());
-          break;
-        }
-        case '?': useStore.setState({ help: !s.help }); break;
-        case 'Escape': useStore.setState({ help: false }); break;
-        default: return;
-      }
-      e.preventDefault();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
 }
 
 const BUCKET_ORDER: CheckBucket[] = ['fail', 'pending', 'ok', 'skipped'];

@@ -7,6 +7,7 @@ import {
   ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, pendingIn, resetFolds,
   setCollapsed, setFolds, setLocalOutdated, toast, toggleFileHidden, toggleOutline, useStore, type ComposerTarget,
 } from './store.ts';
+import { kbd } from './keys.ts';
 import { Lazy } from './Lazy.tsx';
 import { NewComment, ThreadView } from './Thread.tsx';
 import { StatusLetter } from './bits.tsx';
@@ -142,7 +143,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
         {pendingIn(threads) > 0 && <span className="chip pending" title="Pending comments: only you can see them until you finish your review">{pendingIn(threads)} pending</span>}
         {blob === 'loading' && !collapsed && <span className="faint" title="loading full file for context">…</span>}
-        <button className={`small${outlined ? ' on' : ''}`} title="Whole file with its blocks folded (z; all files: Z)" onClick={() => toggleOutline(path)}>
+        <button className={`small${outlined ? ' on' : ''}`} title={`Whole file with its blocks folded (${kbd('outline')})`} onClick={() => toggleOutline(path)}>
           Outline
         </button>
         {(!unchanged || localReview) && (
@@ -157,7 +158,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         )}
         {ghUrl && <a className="btn small" title="View file at head on GitHub" target="_blank" rel="noreferrer" href={ghUrl}>↗</a>}
         {!unchanged && (
-          <label title="Mark viewed (v)">
+          <label title={`Mark viewed (${kbd('viewed')})`}>
             <input type="checkbox" checked={isViewed(viewed)} onChange={e => markViewed([path], e.target.checked)} /> Viewed
           </label>
         )}

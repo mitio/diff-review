@@ -64,7 +64,7 @@ const drop = <T,>(d: Dict<T>, k: string): Dict<T> => {
   return n;
 };
 
-interface State {
+export interface State {
   ref: ReviewRef | null;
   pr: PrData | null;
   loading: boolean;
@@ -955,6 +955,14 @@ export function toggleFileHidden(f: PrFile) {
 
 export function setCollapsed(path: string, collapsed: boolean) {
   set(s => ({ collapsed: put(s.collapsed, path, collapsed) }));
+}
+
+export function setCollapsedMany(paths: string[], collapsed: boolean) {
+  set(s => {
+    const next = dict(s.collapsed);
+    for (const p of paths) next[p] = collapsed;
+    return { collapsed: next };
+  });
 }
 
 export function toggleOutline(path: string) {

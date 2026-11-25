@@ -332,6 +332,8 @@ button.pending-review { background: var(--warn-bg); border-color: var(--pending)
 .help table { border-collapse: collapse; }
 .help td { padding: 2px 10px 2px 0; }
 .help td:first-child { font-family: var(--mono); color: var(--accent); white-space: nowrap; }
+.help th { text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-muted); padding: 8px 0 2px; }
+.help tbody:first-child th { padding-top: 0; }
 
 .home { max-width: 640px; margin: 12vh auto; padding: 0 16px; display: flex; flex-direction: column; gap: 10px; }
 .home form { display: flex; gap: 6px; }

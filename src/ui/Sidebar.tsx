@@ -7,6 +7,7 @@ import {
 } from './store.ts';
 import { MiniBar, StatusLetter } from './bits.tsx';
 import { goToFile } from './nav.ts';
+import { kbd } from './keys.ts';
 
 export function Sidebar() {
   const pr = useStore(s => s.pr)!;
@@ -88,7 +89,7 @@ function OpenedList() {
   return (
     <>
       <div className="frow grow" style={{ paddingLeft: 4, marginTop: 6 }}>
-        <span className="fname muted" title="Files outside the diff, opened with Go to file (T)">Other files</span>
+        <span className="fname muted" title={`Files outside the diff, opened with Go to file (${kbd('finder')})`}>Other files</span>
       </div>
       {openedFiles({ opened }).map(f => <OpenedRow key={f.path} f={f} />)}
     </>
