@@ -248,9 +248,13 @@ export function openCount(s: Pick<State, 'threads'>) {
 }
 
 export function pendingCount(s: Pick<State, 'threads' | 'pr'>) {
-  const me = s.pr?.viewer.login;
+  return pendingIn(s.threads);
+}
+
+/** The viewer's comments in their unsubmitted review. */
+export function pendingIn(threads: Thread[] | undefined) {
   let n = 0;
-  for (const t of s.threads) for (const c of t.comments) if (c.state === 'PENDING' && c.author?.login === me) n++;
+  for (const t of threads ?? []) for (const c of t.comments) if (c.state === 'PENDING') n++;
   return n;
 }
 
@@ -1034,9 +1038,11 @@ export async function createThread(t: NewThread): Promise<boolean> {
   };
   setThreads(ts => [...ts, temp]);
   const key = curKey();
+  const fresh = !get().pendingReviewId;
   try {
     const real = await writing(async () => addThread(await reviewId(), t));
     if (onPr(key)) setThreads(ts => swapTemp(ts, temp.id, real));
+    if (fresh) toast('Started a review. Your comments stay pending, visible only to you, until you finish the review.');
     return true;
   } catch (e) {
     if (onPr(key)) setThreads(ts => ts.filter(x => x.id !== temp.id));

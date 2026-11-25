@@ -2,7 +2,7 @@ import { memo, useMemo, useState, type ReactNode } from 'react';
 import type { PrFile, TreeNode } from '../types.ts';
 import { buildTree, categorize, CATEGORIES, CATEGORY_LABELS } from '../lib/categorize.ts';
 import {
-  addRule, closeOpened, fileHidden, openedFiles, isViewed, markViewed, matchesFilter, matchesFocus, toggleFileHidden, updateSettings, useStore,
+  addRule, closeOpened, fileHidden, pendingIn, openedFiles, isViewed, markViewed, matchesFilter, matchesFocus, toggleFileHidden, updateSettings, useStore,
   type Grouping,
 } from './store.ts';
 import { MiniBar, StatusLetter } from './bits.tsx';
@@ -98,15 +98,21 @@ function OpenedList() {
 function OpenedRow({ f }: { f: PrFile }) {
   const current = useStore(s => s.current === f.path);
   const nThreads = useStore(s => s.threadsByPath[f.path]?.length ?? 0);
+  const nPending = useStore(s => pendingIn(s.threadsByPath[f.path]));
   return (
     <div className={`frow${current ? ' current' : ''}`} style={{ paddingLeft: 18 }} onClick={() => goToFile(f.path)} title={f.path}>
       <StatusLetter status={f.status} />
       <span className="fname">{f.path}</span>
+      {nPending > 0 && <PendingCount n={nPending} />}
       {nThreads > 0 ? <span className="count">💬{nThreads}</span> : (
         <button className="link small" title="Close" onClick={e => { e.stopPropagation(); closeOpened(f.path); }}>×</button>
       )}
     </div>
   );
+}
+
+function PendingCount({ n }: { n: number }) {
+  return <span className="count pending" title={`${n} pending comment${n === 1 ? '' : 's'}, visible only to you until you finish your review`}>✎{n}</span>;
 }
 
 function Resizer() {
@@ -181,6 +187,7 @@ const FileRow = memo(function FileRow({ f, max, depth, label }: { f: PrFile; max
   const current = useStore(s => s.current === f.path);
   const hidden = useStore(s => fileHidden(s, f));
   const nThreads = useStore(s => (s.threadsByPath[f.path]?.length ?? 0) + (f.previousPath ? s.threadsByPath[f.previousPath]?.length ?? 0 : 0));
+  const nPending = useStore(s => pendingIn(s.threadsByPath[f.path]) + (f.previousPath ? pendingIn(s.threadsByPath[f.previousPath]) : 0));
   return (
     <div
       className={`frow${current ? ' current' : ''}${hidden ? ' hidden-file' : ''}${isViewed(v) ? ' viewed' : ''}`}
@@ -198,6 +205,7 @@ const FileRow = memo(function FileRow({ f, max, depth, label }: { f: PrFile; max
       <StatusLetter status={f.status} />
       <span className="fname">{label}</span>
       {v === 'DISMISSED' && <span className="warn" title="changed since viewed" style={{ color: 'var(--warn-fg)' }}>●</span>}
+      {nPending > 0 && <PendingCount n={nPending} />}
       {nThreads > 0 && <span className="count">💬{nThreads}</span>}
       <MiniBar a={f.additions} d={f.deletions} max={max} />
     </div>

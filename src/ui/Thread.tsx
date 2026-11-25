@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import type { Comment, NewThread, Thread } from '../types.ts';
-import { createThread, draftKey, editComment, isLocalReview, removeComment, reply, setResolved, useStore } from './store.ts';
+import { createThread, draftKey, editComment, isLocalReview, pendingIn, removeComment, reply, setResolved, useStore } from './store.ts';
 import { UserLink, relTime } from './bits.tsx';
 
 DOMPurify.addHook('afterSanitizeAttributes', node => {
@@ -85,6 +85,13 @@ export function Editor({ draftId, initial, placeholder, submitLabel, onSubmit, o
   );
 }
 
+/** GitHub's wording: every PR comment goes into the viewer's pending review. */
+function useReviewLabel() {
+  const local = useStore(s => isLocalReview(s));
+  const started = useStore(s => !!s.pendingReviewId);
+  return local ? 'Add comment' : started ? 'Add review comment' : 'Start a review';
+}
+
 export function NewComment({ path, label, initial, target, onDone }: {
   path: string;
   label?: string;
@@ -92,14 +99,14 @@ export function NewComment({ path, label, initial, target, onDone }: {
   target: NewThread;
   onDone: () => void;
 }) {
-  const local = useStore(s => isLocalReview(s));
+  const submitLabel = useReviewLabel();
   return (
     <div className="thread">
       <div className="thead"><b>{label ?? 'Comment on file'}</b></div>
       <Editor
         draftId={`new:${path}:${target.subjectType}`}
         initial={initial}
-        submitLabel={local ? 'Add comment' : 'Add to review'}
+        submitLabel={submitLabel}
         onSubmit={async body => {
           onDone();
           return createThread({ ...target, body });
@@ -127,7 +134,7 @@ function CommentView({ c }: { c: Comment }) {
         ) : (
           <span className="faint">{tmp ? 'saving…' : relTime(c.createdAt)}</span>
         )}
-        {c.state === 'PENDING' && <span className="chip pending">Pending</span>}
+        {c.state === 'PENDING' && <span className="chip pending" title="Only you can see this until you finish your review">Pending</span>}
         <span className="spacer" />
         {c.viewerCanUpdate && !editing && <button className="small" onClick={() => setEditing(true)}>Edit</button>}
         {c.viewerCanDelete && !editing && (
@@ -160,6 +167,8 @@ export const ThreadView = memo(function ThreadView({ thread, showLocation }: { t
   const [replying, setReplying] = useState(false);
   const tmp = thread.id.startsWith('tmp-');
   const pendingReview = useStore(s => s.pendingReviewId);
+  const replyLabel = useReviewLabel();
+  const nPending = pendingIn([thread]);
   const first = thread.comments[0];
   const where = thread.subjectType === 'FILE'
     ? 'file'
@@ -167,12 +176,13 @@ export const ThreadView = memo(function ThreadView({ thread, showLocation }: { t
       ? `${thread.side === 'LEFT' ? 'old ' : ''}line ${thread.startLine && thread.startLine !== thread.line ? `${thread.startLine}–` : ''}${thread.line}`
       : `outdated · was line ${thread.originalLine ?? '?'}`;
   return (
-    <div className={`thread${thread.isResolved ? ' resolved' : ''}${open ? '' : ' collapsed'}`}>
+    <div className={`thread${thread.isResolved ? ' resolved' : ''}${open ? '' : ' collapsed'}${nPending ? ' pending' : ''}`}>
       <div className="thead">
         <button className="link" onClick={() => setOpen(!open)}>{open ? '▾' : '▸'}</button>
         {(showLocation || thread.isOutdated) && <span className="muted">{where}</span>}
         {thread.isOutdated && <span className="chip warn">outdated</span>}
         {thread.isResolved && <span className="chip">resolved</span>}
+        {nPending > 0 && <span className="chip pending" title="Only you can see pending comments until you finish your review">{nPending === thread.comments.length ? 'Pending' : `${nPending} pending`}</span>}
         {!open && first && (
           <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <b>{first.author?.login}</b>: {first.body.slice(0, 120)}
@@ -192,7 +202,7 @@ export const ThreadView = memo(function ThreadView({ thread, showLocation }: { t
         replying ? (
           <Editor
             draftId={`reply:${thread.id}`}
-            submitLabel="Add reply"
+            submitLabel={replyLabel}
             onSubmit={async body => {
               setReplying(false);
               return reply(thread.id, body);

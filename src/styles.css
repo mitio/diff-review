@@ -297,6 +297,9 @@ table.groups .acts button { margin-left: 2px; }
 .comment .md img { max-width: 100%; }
 .comment .md blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--border); color: var(--fg-muted); }
 .comment.pending { background: linear-gradient(90deg, var(--warn-bg), transparent 40%); }
+.thread.pending { border-color: var(--pending); border-left-width: 3px; }
+.frow .count.pending { color: var(--pending); font-weight: 600; }
+button.pending-review { background: var(--warn-bg); border-color: var(--pending); color: var(--pending); font-weight: 600; }
 .composer { padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
 .composer .row { display: flex; gap: 6px; align-items: center; }
 .composer .row .spacer { flex: 1; }

@@ -334,8 +334,12 @@ function PrTopBar() {
       {revalidating && <span className="faint" title="Showing the cached copy while fetching the latest">syncing…</span>}
       <ViewControls conversation />
       <span style={{ position: 'relative' }}>
-        <button className={hasDraft || pending ? 'primary' : ''} onClick={() => setReviewOpen(!reviewOpen)}>
-          Review{pending ? ` · ${pending} pending` : ''}
+        <button
+          className={hasDraft || pending ? 'pending-review' : ''}
+          onClick={() => setReviewOpen(!reviewOpen)}
+          title={hasDraft || pending ? 'Your review is not submitted: only you can see its comments' : 'Submit a review'}
+        >
+          {hasDraft || pending ? `Finish review · ${pending} pending` : 'Review'}
         </button>
         {reviewOpen && <ReviewPanel onClose={() => setReviewOpen(false)} />}
       </span>
@@ -372,7 +376,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
     <div className="popover" ref={ref} style={{ right: 0, top: 30 }} onKeyDown={e => { if (e.key === 'Escape') onClose(); }}>
       <h3>Finish your review</h3>
       <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-        {pending ? `${pending} pending comment${pending === 1 ? '' : 's'}` : 'No pending comments'}{hasDraft ? ' in your draft review' : ''}.
+        {pending ? `${pending} pending comment${pending === 1 ? '' : 's'}` : 'No pending comments'}{hasDraft ? ' in your draft review' : ''}.{pending ? ' Only you can see them until you submit.' : ''}
       </div>
       <textarea
         autoFocus

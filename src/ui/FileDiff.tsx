@@ -4,7 +4,7 @@ import { buildModel, lineAnchor, parsePatch, splitPairs, validRange, view, wordD
 import { anchorStatus, locateThread, quoteRows } from '../lib/anchor.ts';
 import { ghRepo } from '../lib/refs.ts';
 import {
-  ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, resetFolds,
+  ALL, closeComposer, closeOpened, expand, fileHidden, isLocalReview, isUnchanged, isViewed, loadBigDiff, markViewed, openComposer, pendingIn, resetFolds,
   setCollapsed, setFolds, setLocalOutdated, toast, toggleFileHidden, toggleOutline, useStore, type ComposerTarget,
 } from './store.ts';
 import { Lazy } from './Lazy.tsx';
@@ -140,6 +140,7 @@ export const FileBlock = memo(function FileBlock({ file }: { file: PrFile }) {
         {viewed === 'DISMISSED' && <span className="chip warn">changed since viewed</span>}
         {hidden && <span className="chip">hidden</span>}
         {threads.length > 0 && <span className="chip" title="threads">💬 {threads.length}</span>}
+        {pendingIn(threads) > 0 && <span className="chip pending" title="Pending comments: only you can see them until you finish your review">{pendingIn(threads)} pending</span>}
         {blob === 'loading' && !collapsed && <span className="faint" title="loading full file for context">…</span>}
         <button className={`small${outlined ? ' on' : ''}`} title="Whole file with its blocks folded (z; all files: Z)" onClick={() => toggleOutline(path)}>
           Outline
