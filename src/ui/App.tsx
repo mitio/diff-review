@@ -368,14 +368,24 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
     setBody(v);
     try { if (v) localStorage.setItem(key, v); else localStorage.removeItem(key); } catch { /* */ }
   };
+  const canSubmit = !sending && !(event === 'COMMENT' && !body.trim() && !pending);
   const go = async () => {
+    if (!canSubmit) return;
     setSending(true);
     const ok = await submit(event, body.trim());
     setSending(false);
     if (ok) { save(''); onClose(); }
   };
   return (
-    <div className="popover" ref={ref} style={{ right: 0, top: 30 }} onKeyDown={e => { if (e.key === 'Escape') onClose(); }}>
+    <div
+      className="popover"
+      ref={ref}
+      style={{ right: 0, top: 30 }}
+      onKeyDown={e => {
+        if (e.key === 'Escape') onClose();
+        else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void go(); }
+      }}
+    >
       <h3>Finish your review</h3>
       <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
         {pending ? `${pending} pending comment${pending === 1 ? '' : 's'}` : 'No pending comments'}{hasDraft ? ' in your draft review' : ''}.{pending ? ' Only you can see them until you submit.' : ''}
@@ -386,7 +396,6 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
         placeholder="Leave a comment (optional)"
         value={body}
         onChange={e => save(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void go(); } }}
       />
       <div className="opts">
         <label><input type="radio" checked={event === 'COMMENT'} onChange={() => setEvent('COMMENT')} /> Comment <small>general feedback</small></label>
@@ -405,7 +414,7 @@ function ReviewPanel({ onClose }: { onClose: () => void }) {
         )}
         <span className="spacer" />
         <button onClick={onClose}>Cancel</button>
-        <button className="primary" disabled={sending || (event === 'COMMENT' && !body.trim() && !pending)} onClick={() => void go()}>
+        <button className="primary" disabled={!canSubmit} onClick={() => void go()} title="⌘↵">
           Submit review
         </button>
       </div>
