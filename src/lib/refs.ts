@@ -84,21 +84,28 @@ export function appPath(r: ReviewRef, tab: RefTab, extra?: URLSearchParams): str
 
 /**
  * A pasted/typed reference: a GitHub or app URL (PR, commit, compare), `o/r#N`, or `o/r/pull/N`. Local and paste
- * refs only come from app URLs.
+ * refs only come from app URLs. GitHub URLs may point anywhere inside a PR or commit (`/changes`, `#diff-…`, `.diff`).
  */
 export function parseReviewInput(s: string): ReviewRef | null {
-  s = s.trim();
+  s = s.trim().replace(/^[<("']+|[>)"'.,;]+$/g, '');
   const short = new RegExp(`^(${NAME})/(${NAME})#([1-9]\\d*)$`).exec(s);
   if (short) return { kind: 'pr', owner: short[1], repo: short[2], number: Number(short[3]) };
-  let path = s, search = '';
-  if (/^https?:\/\//.test(s)) {
+  if (/^(www\.)?github\.com\//i.test(s)) s = `https://${s}`;
+  let path = s, search = '', app = false;
+  if (/^https?:\/\//i.test(s)) {
     let u: URL;
     try { u = new URL(s); } catch { return null; }
-    const app = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(u.origin);
-    if (u.origin !== 'https://github.com' && !app) return null;
+    app = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(u.origin);
+    if (!/^https?:\/\/(www\.)?github\.com$/.test(u.origin) && !app) return null;
     path = u.pathname; search = app ? u.search : '';
   } else if (!path.startsWith('/')) path = `/${path}`;
-  // PR sub-pages (`/pull/1/files`) are accepted by parseAppPath; a compare ref may itself end in `/files`
+  if (!app) {
+    // a compare ref may itself end in `/files`, so only PRs and commits drop their sub-pages
+    const pr = new RegExp(`^/(${NAME})/(${NAME})/pulls?/([1-9]\\d*)(?:[/.].*)?$`).exec(path);
+    const commit = new RegExp(`^/(${NAME})/(${NAME})/commit/([0-9a-fA-F]{7,40})(?:[/.].*)?$`).exec(path);
+    if (pr) path = `/${pr[1]}/${pr[2]}/pull/${pr[3]}`;
+    else if (commit) path = `/${commit[1]}/${commit[2]}/commit/${commit[3]}`;
+  }
   return parseAppPath(path, search)?.ref ?? null;
 }
 

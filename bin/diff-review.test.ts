@@ -29,6 +29,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['-'], env)).toMatchObject({ source: { kind: 'stdin' } });
     expect(parseArgs(['o/r#1'], env)).toMatchObject({ source: { kind: 'ref', ref: { kind: 'pr', number: 1 } } });
     expect(parseArgs(['https://github.com/o/r/commit/abcdef0'], env)).toMatchObject({ source: { kind: 'ref', ref: { kind: 'commit', sha: 'abcdef0' } } });
+    expect(parseArgs(['github.com/o/r/pull/7/changes'], env)).toMatchObject({ source: { kind: 'ref', ref: { kind: 'pr', number: 7 } } });
   });
   it('parses flags and rejects ambiguous or invalid arguments', () => {
     expect(parseArgs(['export', '--all', '--port', '8000', '--print'], env)).toMatchObject({ action: 'export', all: true, print: true, port: 8000 });

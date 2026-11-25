@@ -34,6 +34,27 @@ describe('routes', () => {
     expect(parseRoute('/o/r/compare/a..b', '').ref).toBeNull();
     expect(parseReviewInput('https://github.com/o/r/compare/main...feature/files')).toEqual({ kind: 'compare', owner: 'o', repo: 'r', base: 'main', head: 'feature/files' });
     expect(parseReviewInput('https://github.com/o/r/pull/3/files')).toEqual({ kind: 'pr', owner: 'o', repo: 'r', number: 3 });
+    expect(parseRoute('/o/r/pull/3/changes', '').ref).toBeNull();
+  });
+
+  it('accepts any GitHub URL inside a PR or commit', () => {
+    const pr = { kind: 'pr', owner: 'dext', repo: 'application', number: 17502 };
+    for (const u of [
+      'https://github.com/dext/application/pull/17502/changes#diff-e4858c04cf1eb077b623b6cd2e09e548e115cdcff4e421cced2c3866dd1ae162',
+      'https://github.com/dext/application/pull/17502/files/abc123..def456',
+      'https://github.com/dext/application/pull/17502/commits/abc1234',
+      'https://github.com/dext/application/pull/17502.diff',
+      'https://github.com/dext/application/pull/17502?w=1#discussion_r1',
+      'https://www.github.com/dext/application/pulls/17502',
+      'http://github.com/dext/application/pull/17502',
+      'github.com/dext/application/pull/17502/changes',
+      '<https://github.com/dext/application/pull/17502>',
+      '  dext/application/pull/17502/checks ',
+    ]) expect(parseReviewInput(u), u).toEqual(pr);
+    expect(parseReviewInput('https://github.com/o/r/commit/ABC1234.patch')).toEqual({ kind: 'commit', owner: 'o', repo: 'r', sha: 'abc1234' });
+    expect(parseReviewInput('https://github.com/o/r/commit/abc1234#diff-1')).toEqual({ kind: 'commit', owner: 'o', repo: 'r', sha: 'abc1234' });
+    expect(parseReviewInput('https://gitlab.com/o/r/pull/1')).toBeNull();
+    expect(parseReviewInput('https://github.com/o/r/issues/1')).toBeNull();
     expect(parseRoute('/local', '?repo=relative').ref).toBeNull();
   });
 

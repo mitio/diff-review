@@ -49,7 +49,7 @@ export function parseArgs(argv: string[], env: { isFile(p: string): boolean }): 
   else if (input === undefined) source = { kind: 'local', range: '' };
   else if (input === '-') source = { kind: 'stdin' };
   else {
-    const ref = (/^https?:\/\//.test(input) || /^[^/]+\/[^/]+#\d+$/.test(input)) ? parseReviewInput(input) : null;
+    const ref = (/^(https?:\/\/|(www\.)?github\.com\/)/i.test(input) || /^[^/]+\/[^/]+#\d+$/.test(input)) ? parseReviewInput(input) : null;
     if (ref) source = { kind: 'ref', ref };
     else if (/\.(diff|patch)$/.test(input) && env.isFile(input)) source = { kind: 'file', path: input };
     else source = { kind: 'local', range: input };
