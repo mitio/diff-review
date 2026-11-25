@@ -3,10 +3,12 @@
 A fast local UI for reviewing diffs: GitHub pull requests, commits and compares, local git changes and pasted diffs.
 It uses your `gh` login, and the token never leaves the local server.
 
+![Reviewing pmndrs/zustand#3583: expanding lines, split view, Overview and Conversation, review threads, going to a file, an emoji in a comment, the keyboard help](docs/demo.gif)
+
 ```sh
 npm install
 npm start            # builds, then serves http://127.0.0.1:7777
-npm link             # optional: puts the diff-review CLI on your PATH
+npm link             # optional: puts the diff-review CLI on your PATH, also as `dr`
 ```
 
 Requires Node 24+ and an authenticated [GitHub CLI](https://cli.github.com/) (`gh auth login`). Open a PR, commit or
@@ -38,19 +40,22 @@ The CLI starts the server if it isn't running (log: `~/.local/state/diff-review/
 ## Pull requests
 
 - **Draft review:** click a line number to comment, drag or shift-click for a range, ⌘↵ adds the comment to your pending
-  review. Click **Review** to submit (Comment / Approve / Request changes) or discard. GitHub only accepts line
+  review, and pending comments are marked until you submit. **Finish review** (`f`) submits it (Comment / Approve /
+  Request changes) or discards it. GitHub only accepts line
   comments inside its own diff hunks; clicking a line outside them starts a file comment that quotes the line.
-- **Conversation** (`t`): the PR description, top-level comments and review summaries. Comments posted there go out
+- **Conversation** (`m` cycles Diff → Overview → Conversation): the PR description, top-level comments and review summaries. Comments posted there go out
   immediately, separately from your draft review.
 - **Viewed** state syncs with GitHub. **Hide** is local: per file, folder, category or glob (Overview → Hidden rules).
   Folder, category and glob rules apply to every PR in the repo.
-- **Overview** (`o`): files grouped by category and by folder, with churn, viewed progress and bulk actions.
+- **Overview**: files grouped by category and by folder, with churn, viewed progress and bulk actions.
 - **CI**: the checks of the head commit, failing first; the chip polls while checks are running.
 - **Syntax highlighting** (`h` toggles) runs in a web worker and never blocks scrolling.
 - **The URL holds the view** (tab, focused group, filter, current file), so back/forward and links work.
   Unified/split, context and font size are preferences and stay as you set them.
-- **Keys:** `j/k` files, `v` viewed + next, `x` collapse, `s` split/unified, `[ ]` context, `- =` font, `/` filter,
-  `o/d/t` overview/diff/conversation, `r` refresh, `c` file comment, `z` outline, `?` help.
+- **Keys** (Shift applies a file key to all files): `j/k` files, `t` go to any file, `/` filter, `m/M` views, `v` viewed +
+  next, `x` collapse, `e` expand all lines, `z` outline, `c` file comment, `f` finish review, `s` split/unified,
+  `[ ]` context, `- =` font, `h` highlighting, `b` file list, `r` refresh, `?` help.
+- **Comments** render GitHub's Markdown with syntax-highlighted code blocks, and `:` autocompletes emoji.
 
 `npm test` runs the unit tests and `npm run typecheck` runs the type checker. Design and decisions: `docs/plan.md`.
 

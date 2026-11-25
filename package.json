@@ -2,7 +2,8 @@
   "name": "diff-review",
   "version": "0.0.0",
   "bin": {
-    "diff-review": "bin/diff-review.ts"
+    "diff-review": "bin/diff-review.ts",
+    "dr": "bin/diff-review.ts"
   },
   "private": true,
   "type": "module",
