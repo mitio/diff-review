@@ -50,13 +50,13 @@ The CLI starts the server if it isn't running (log: `~/.local/state/diff-review/
   Folder, category and glob rules apply to every PR in the repo.
 - **Overview**: files grouped by category and by folder, with churn, viewed progress and bulk actions.
 - **CI**: the checks of the head commit, failing first; the chip polls while checks are running.
-- **Syntax highlighting** (`h` toggles) runs in a web worker and never blocks scrolling.
+- **Syntax highlighting** (`y` toggles) runs in a web worker and never blocks scrolling.
 - **The URL holds the view** (tab, focused group, filter, current file), so back/forward and links work.
   Unified/split, context and font size are preferences and stay as you set them.
 - **Keys** (Shift applies a file key to all files): `↓ ↑`, `Space`/`⇧Space`, `J/K` half page and `g/G` scroll the view
   wherever focus is; `j/k` files, `t` go to any file, `/` filter, `m/M` views, `v` viewed +
   next, `x` collapse, `e` expand all lines, `z` outline, `c` file comment, `f` finish review, `s` split/unified,
-  `[ ]` context, `- =` font, `h` highlighting, `b` file list, `r` refresh, `?` help.
+  `[ ]` context, `- =` font, `y` highlighting, `h` home, `b` file list, `r` refresh, `?` help.
 - **Comments** render GitHub's Markdown with syntax-highlighted code blocks, and `:` autocompletes emoji.
 
 `npm test` runs the unit tests and `npm run typecheck` runs the type checker. Design and decisions: `docs/plan.md`.

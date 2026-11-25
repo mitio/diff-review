@@ -229,7 +229,7 @@ function LocalTopBar() {
   const r = pr.ref;
   return (
     <div className="topbar">
-      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent reviews">⌂</a>
+      <a className="btn icon" href="/" onClick={onLinkClick} title={`Home: recent reviews (${kbd('home')})`}>⌂</a>
       {gh
         ? <a className="title" href={gh} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
         : <span className="title" title={pr.title}>{pr.title}</span>}
@@ -321,7 +321,7 @@ function PrTopBar() {
   const nViewed = pr.files.filter(f => isViewed(viewed[f.path])).length;
   return (
     <div className="topbar">
-      <a className="btn icon" href="/" onClick={onLinkClick} title="Home: recent PRs">⌂</a>
+      <a className="btn icon" href="/" onClick={onLinkClick} title={`Home: recent reviews (${kbd('home')})`}>⌂</a>
       <a className="title" href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>{pr.title}</a>
       <a className="muted" href={pr.url} target="_blank" rel="noreferrer">#{isPr(pr.ref) ? pr.ref.number : ''}</a>
       <span className={`chip ${pr.isDraft ? 'draft' : `state-${pr.state}`}`}>{pr.isDraft ? 'Draft' : pr.state.toLowerCase()}</span>

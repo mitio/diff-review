@@ -6,6 +6,7 @@ import {
 } from './store.ts';
 import { mainEl, stepFile, toggleViewedCurrent } from './nav.ts';
 import { openFinder } from './Finder.tsx';
+import { navigate } from './router.ts';
 
 export const CONTEXTS = [0, 3, 5, 10, 15, 25, ALL];
 
@@ -79,6 +80,7 @@ export const SHORTCUTS = [
     items: {
       step: { keys: ['j', 'k'], label: 'next / previous file', run: (_, alt) => stepFile(alt ? -1 : 1) },
       finder: { keys: ['t'], label: 'go to any file', run: () => openFinder() },
+      home: { keys: ['h'], label: 'home: recent reviews', run: () => navigate('/') },
       filter: {
         keys: ['/'], label: 'filter the file list', run: s => {
           if (!s.settings.sidebar) updateSettings({ sidebar: true });
@@ -119,7 +121,7 @@ export const SHORTCUTS = [
       split: { keys: ['s'], label: 'unified / split', run: s => updateSettings({ viewMode: s.settings.viewMode === 'split' ? 'unified' : 'split' }) },
       context: { keys: ['[', ']'], label: 'less / more context', run: (s, alt) => stepContext(s, alt ? 1 : -1) },
       font: { keys: ['-', '='], label: 'smaller / larger font', run: (s, alt) => updateSettings({ fontSize: Math.min(18, Math.max(9, s.settings.fontSize + (alt ? 1 : -1))) }) },
-      highlight: { keys: ['h'], label: 'syntax highlighting on / off', run: s => updateSettings({ highlight: !s.settings.highlight }) },
+      highlight: { keys: ['y'], label: 'syntax highlighting on / off', run: s => updateSettings({ highlight: !s.settings.highlight }) },
       sidebar: { keys: ['b'], label: 'file list on / off', run: () => toggleSidebar() },
     },
   },
