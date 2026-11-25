@@ -295,6 +295,12 @@ table.groups .acts button { margin-left: 2px; }
 .comment .md code { font-family: var(--mono); font-size: 12px; background: var(--bg-soft); padding: 1px 4px; border-radius: 4px; }
 .comment .md pre code { padding: 0; background: none; }
 .comment .md img { max-width: 100%; }
+.md table { display: block; width: max-content; max-width: 100%; overflow: auto; border-collapse: collapse; border-spacing: 0; margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+.md th, .md td { padding: 6px 13px; border: 1px solid var(--border); overflow-wrap: normal; }
+.md th { font-weight: 600; }
+.md tr { background: var(--bg); border-top: 1px solid var(--border); }
+.md tr:nth-child(2n) { background: var(--bg-soft); }
+.md td > :last-child, .md th > :last-child { margin-bottom: 0; }
 .comment .md blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--border); color: var(--fg-muted); }
 .comment.pending { background: linear-gradient(90deg, var(--warn-bg), transparent 40%); }
 .thread.pending { border-color: var(--pending); border-left-width: 3px; }
