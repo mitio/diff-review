@@ -29,4 +29,9 @@ describe('searchEmoji', () => {
     expect(searchEmoji(gemoji, 's')).toHaveLength(8);
     expect(searchEmoji(gemoji, 'zzzzq')).toEqual([]);
   });
+  it('falls back to fuzzy matches after the exact kinds', () => {
+    expect(searchEmoji(gemoji, 'thup')[0]).toEqual({ emoji: '👍', name: 'thumbsup' });
+    expect(searchEmoji(gemoji, 'rckt').map(h => h.name)).toContain('rocket');
+    expect(searchEmoji(gemoji, 'tada').map(h => h.emoji)).toEqual([...new Set(searchEmoji(gemoji, 'tada').map(h => h.emoji))]);
+  });
 });
