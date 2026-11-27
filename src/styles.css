@@ -330,6 +330,12 @@ button.pending-review { background: var(--warn-bg); border-color: var(--pending)
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 button.reaction { padding: 1px 8px; border-radius: 12px; font-size: 12px; }
 button.reaction.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tooltip {
+  position: fixed; z-index: 100; max-width: 360px; padding: 4px 8px; border-radius: 6px; pointer-events: none;
+  background: var(--fg); color: var(--bg); font-size: 12px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere;
+  box-shadow: 0 4px 12px rgba(0,0,0,.15);
+}
+.tooltip[hidden] { display: none; }
 .popover.reaction-pick { position: fixed; z-index: 50; width: auto; padding: 4px; display: flex; gap: 2px; }
 .popover.reaction-pick button { border: 1px solid transparent; background: none; font-size: 18px; padding: 2px 6px; border-radius: 6px; }
 .popover.reaction-pick button:hover { background: var(--bg-soft); }
