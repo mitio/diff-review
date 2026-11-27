@@ -6,6 +6,7 @@ import nginx from 'highlight.js/lib/languages/nginx';
 import protobuf from 'highlight.js/lib/languages/protobuf';
 import scala from 'highlight.js/lib/languages/scala';
 import type { Row } from '../types.ts';
+import hcl from './hcl.ts';
 export { languageOf } from './languages.ts';
 
 export type { Tok } from './languages.ts';
@@ -15,7 +16,7 @@ let lowlight: ReturnType<typeof createLowlight> | null = null;
 function ll() {
   if (!lowlight) {
     lowlight = createLowlight(common);
-    lowlight.register({ dockerfile, elixir, erb, nginx, protobuf, scala });
+    lowlight.register({ dockerfile, elixir, erb, hcl, nginx, protobuf, scala });
   }
   return lowlight;
 }

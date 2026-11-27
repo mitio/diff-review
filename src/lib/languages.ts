@@ -15,7 +15,7 @@ const EXT: Record<string, string> = {
   erb: 'erb', md: 'markdown', markdown: 'markdown', mdx: 'markdown',
   yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini', properties: 'ini', env: 'bash',
   sql: 'sql', graphql: 'graphql', gql: 'graphql', proto: 'protobuf', diff: 'diff', patch: 'diff', mk: 'makefile',
-  dockerfile: 'dockerfile',
+  dockerfile: 'dockerfile', tf: 'hcl', tfvars: 'hcl', hcl: 'hcl', tfbackend: 'hcl', nomad: 'hcl',
 };
 const NAMES: Record<string, string> = {
   dockerfile: 'dockerfile', makefile: 'makefile', gnumakefile: 'makefile', gemfile: 'ruby', rakefile: 'ruby',
