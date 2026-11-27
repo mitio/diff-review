@@ -55,6 +55,43 @@ describe('outline', () => {
     expect(heads(rb, 'ruby')).toEqual(['module M', 'class Foo < Bar', 'def initialize(a)']);
   });
 
+  it('takes Ruby DSL blocks as sections, not blocks on a receiver or inside methods', () => {
+    const rb = rows([
+      "application_v2 'onetap' do",
+      '  architecture :arm64',
+      "  env 'common' do",
+      '    APP_ENV x',
+      '  end',
+      "  workers 'web', group: g do",
+      "    process 'main' do",
+      '      resources do',
+      '        cpu 1',
+      '      end',
+      '    end',
+      '  end',
+      '  groups.each do |name, o|',
+      "    workers 'sidekiq' do",
+      '      replicas 2',
+      '    end',
+      '  end',
+      '  def helper',
+      '    transaction do',
+      '      x',
+      '    end',
+      '  end',
+      'end',
+    ].join('\n'));
+    expect(heads(rb, 'ruby')).toEqual([
+      "application_v2 'onetap' do",
+      "env 'common' do",
+      "workers 'web', group: g do",
+      "process 'main' do",
+      'resources do',
+      "workers 'sidekiq' do",
+      'def helper',
+    ]);
+  });
+
   it('uses headings for markdown and shallow keys for data files', () => {
     expect(heads(rows('intro\n# Title\ntext\n  ## indented is not a heading\n## Section\n```\n# in code\n```'), 'markdown'))
       .toEqual(['(top)', '# Title', '## Section']);

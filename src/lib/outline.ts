@@ -9,6 +9,9 @@ const MODS = '(?:(?:export|default|public|private|protected|internal|static|asyn
 const DEF = new RegExp(
   `^\\s*${MODS}(?:(?:def(?:p|module|macro)?|fn|fun|func|function\\*?|class|module|interface|struct|enum|impl|trait|object|record|namespace|protocol|extension|type)\\s|(?:await\\s+)?(?:[\\w$]+\\.)?(?:describe|context|it|test)(?:\\.\\w+)?\\s*\\()`,
 );
+/** A Ruby DSL block on a bare call (`workers 'web' do`, `describe X do`), not `list.each do` */
+const RUBY_DSL = /^\s*[A-Za-z_]\w*[?!]?(?:[\s(].*)?\sdo(?:\s*\|[^|]*\|)?\s*$/;
+const RUBY_DEF = /^\s*def\s/;
 const METHOD = /^\s*([\w$<>[\]?,.\s]*?)\b([A-Za-z_$][\w$]*)\s*\(.*\{\s*$/;
 const CONTROL = new Set([
   'if', 'for', 'while', 'switch', 'catch', 'else', 'do', 'try', 'return', 'with', 'elif', 'unless', 'until', 'case',
@@ -32,11 +35,11 @@ function isMethod(text: string) {
   return ![...m[1].split(/\s+/), m[2]].some(w => CONTROL.has(w));
 }
 
-function accept(text: string, depth: number, lang: string | null) {
+function accept(text: string, depth: number, lang: string | null, inDef: boolean) {
   if (NOISE.test(text)) return false;
   if (lang && DATA.has(lang)) return depth <= 2;
   if (depth === 0) return true;
-  return !!lang && depth <= 3 && (DEF.test(text) || isMethod(text));
+  return !!lang && depth <= 3 && (DEF.test(text) || isMethod(text) || (lang === 'ruby' && !inDef && RUBY_DSL.test(text)));
 }
 
 /** Block openers (a line followed by a more indented one) on one side of the diff, keyed by row index. */
@@ -48,15 +51,16 @@ function sideEntries(rows: Row[], side: number[], lang: string | null, out: Map<
     const t = rows[side[j]].text;
     if (t.trim()) next = indent(t);
   }
-  const stack: number[] = [];
+  const stack: Array<{ ind: number; def: boolean }> = [];
   side.forEach((i, j) => {
     const t = rows[i].text;
     if (!t.trim()) return;
     const ind = indent(t);
-    while (stack.length && stack[stack.length - 1] >= ind) stack.pop();
+    while (stack.length && stack[stack.length - 1].ind >= ind) stack.pop();
     if (nextIndent[j] <= ind) return;
-    if (accept(t, stack.length, lang)) out.set(i, stack.length);
-    stack.push(ind);
+    const inDef = stack.some(b => b.def);
+    if (accept(t, stack.length, lang, inDef)) out.set(i, stack.length);
+    stack.push({ ind, def: inDef || (lang === 'ruby' && RUBY_DEF.test(t)) });
   });
 }
 

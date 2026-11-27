@@ -14,7 +14,7 @@ import { StatusLetter } from './bits.tsx';
 import { requestHighlight, useHighlight, type RowToks } from './hl.ts';
 import { languageOf, type Tok } from '../lib/languages.ts';
 import { outline } from '../lib/outline.ts';
-import { foldRanges, type Fold } from '../lib/folds.ts';
+import { foldRanges, outlineFolded, type Fold } from '../lib/folds.ts';
 
 const EMPTY: never[] = [];
 const CHUNK = 400;
@@ -204,33 +204,21 @@ interface BodyProps {
 }
 
 const NO_FOLDS: Record<number, boolean> = {};
-/** an outline leaves shorter blocks open */
-const OUTLINE_MIN = 3;
 
-/** Foldable blocks; in an outline, which are folded by default (those not holding other outline sections). */
+/** Foldable blocks, and which are folded: by the user, else by an outline. */
 function useFolds(model: FileModel, path: string, toks: RowToks | undefined, outlined: boolean) {
   const lang = languageOf(path);
   const folds = useMemo(() => {
     if (!model.complete) return [] as Fold[];
     return foldRanges(model.rows, lang, toks && (i => inStringOrComment(model.rows[i], toks, i)));
   }, [model, lang, toks]);
-  const containers = useMemo(() => {
-    const set = new Set<number>();
-    if (!outlined) return set;
+  const byDefault = useMemo(() => {
+    if (!outlined) return new Set<number>();
     const starts = outline(model.rows, lang, toks && (i => inStringOrComment(model.rows[i], toks, i))).filter(e => !e.top).map(e => e.idx);
-    for (const f of folds) {
-      let lo = 0, hi = starts.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (starts[mid] <= f.start) lo = mid + 1;
-        else hi = mid;
-      }
-      if (lo < starts.length && starts[lo] <= f.end) set.add(f.start);
-    }
-    return set;
+    return outlineFolded(folds, starts, model.rows.length);
   }, [folds, outlined, model, lang, toks]);
   const overrides = useStore(s => s.folds[path]) ?? NO_FOLDS;
-  const isFolded = useMemo(() => (f: Fold) => overrides[f.start] ?? (outlined && f.end - f.start >= OUTLINE_MIN && !containers.has(f.start)), [overrides, outlined, containers]);
+  const isFolded = useMemo(() => (f: Fold) => overrides[f.start] ?? byDefault.has(f.start), [overrides, byDefault]);
   return { folds, isFolded };
 }
 

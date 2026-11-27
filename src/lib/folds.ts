@@ -93,3 +93,27 @@ export function foldRanges(rows: Row[], lang: string | null, skip?: (i: number) 
     };
   });
 }
+
+/** an outline leaves shorter blocks open */
+const OUTLINE_MIN = 3;
+/** a block this share of the file wraps it (`module M`, Kuby's `application 'x' do`) and stays open */
+const WRAPPER = 0.8;
+
+/**
+ * The folds an outline folds by default: blocks holding no outline section (from `starts`, ascending), but not short
+ * ones or one wrapping the whole file.
+ */
+export function outlineFolded(folds: Fold[], starts: number[], rowCount: number): Set<number> {
+  const out = new Set<number>();
+  for (const f of folds) {
+    if (f.end - f.start < OUTLINE_MIN || f.end - f.start + 1 >= rowCount * WRAPPER) continue;
+    let lo = 0, hi = starts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid] <= f.start) lo = mid + 1;
+      else hi = mid;
+    }
+    if (!(lo < starts.length && starts[lo] <= f.end)) out.add(f.start);
+  }
+  return out;
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Row } from '../types.ts';
-import { foldRanges } from './folds.ts';
+import { foldRanges, outlineFolded } from './folds.ts';
+import { outline } from './outline.ts';
 
 const rows = (...lines: string[]): Row[] => lines.map(text => ({ kind: 'ctx', text }));
 const fold = (start: number, end: number, depth = 0, add = 0, del = 0) => ({ start, end, depth, add, del });
@@ -93,5 +94,43 @@ describe('foldRanges', () => {
     expect(result).toHaveLength(19_800);
     expect(result[98]).toEqual(fold(98, 99, 98));
     expect(elapsed).toBeLessThan(300);
+  });
+});
+
+describe('outlineFolded', () => {
+  const folded = (rs: Row[], lang: string) => {
+    const folds = foldRanges(rs, lang);
+    const starts = outline(rs, lang).filter(e => !e.top).map(e => e.idx);
+    return [...outlineFolded(folds, starts, rs.length)].map(i => rs[i].text.trim());
+  };
+
+  it('folds the leaf blocks of a Ruby DSL, not the file-wide wrapper', () => {
+    const rs = rows(
+      "application_v2 'onetap' do",
+      '  architecture :arm64',
+      "  env 'common' do",
+      '    A 1',
+      '    B 2',
+      '    C 3',
+      '  end',
+      "  workers 'web' do",
+      "    process 'main' do",
+      '      resources do',
+      '        cpu 1',
+      '        memory 2',
+      '        disk 3',
+      '      end',
+      '    end',
+      '  end',
+      'end',
+    );
+    expect(folded(rs, 'ruby')).toEqual(["env 'common' do", 'resources do']);
+  });
+
+  it('keeps a block wrapping most of the file open even with no sections inside', () => {
+    const rs = rows('module Config', '  A = 1', '  B = 2', '  C = 3', '  D = 4', 'end');
+    expect(folded(rs, 'ruby')).toEqual([]);
+    const two = rows('module A', '  X = 1', '  Y = 2', '  Z = 3', 'end', 'module B', '  X = 1', '  Y = 2', '  Z = 3', 'end');
+    expect(folded(two, 'ruby')).toEqual(['module A', 'module B']);
   });
 });
